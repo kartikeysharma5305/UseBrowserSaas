@@ -1,0 +1,9111 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { isIP } from 'node:net';
+import { randomUUID } from 'node:crypto';
+import {
+  spawn,
+  execFile,
+  execFileSync,
+  type ChildProcess,
+} from 'node:child_process';
+import { promisify } from 'node:util';
+import { createLogger } from '../logging-config.js';
+import { match_url_with_domain_pattern, uuid7str } from '../utils.js';
+import { canonicalizeDomainHostname } from '../domain-utils.js';
+import { getMaxAutoDownloadBytes } from './download-limits.js';
+import {
+  boundBrowserStateText,
+  boundBrowserStateTitle,
+  boundBrowserStateUrl,
+  MAX_BROWSER_STATE_MESSAGE_CHARS,
+  MAX_BROWSER_STATE_TABS,
+  readBoundedPageTitle,
+} from './state-limits.js';
+import {
+  buildScrollToTextExpression,
+  MAX_SCROLL_TEXT_QUERY_CHARS,
+  type ScrollToTextPageResult,
+} from './text-search.js';
+import { SMART_SCROLL_JS } from './smart-scroll.js';
+import {
+  extractBoundedPageHtml,
+  MAX_MAIN_PAGE_HTML_CHARS,
+} from './page-content.js';
+import {
+  formatDropdownOptions,
+  MAX_DROPDOWN_FIELD_CHARS,
+  MAX_DROPDOWN_MESSAGE_CHARS,
+  MAX_DROPDOWN_OPTIONS,
+  MAX_DROPDOWN_PAYLOAD_CHARS,
+  MAX_DROPDOWN_SCANNED_OPTIONS,
+  normalizeDropdownOptions,
+  serializeDropdownOptions,
+} from './dropdown-options.js';
+import {
+  getProcessArguments,
+  getProcessCommandLine,
+} from '../process-identity.js';
+import {
+  readBoundedStorageStateFile,
+  serializeBoundedStorageState,
+  writeBoundedStorageStateFile,
+} from './storage-state-limits.js';
+import {
+  discoverLocalCdpWebSocketUrl,
+  readDevToolsActivePort,
+  type DevToolsActivePort,
+} from './cdp-discovery.js';
+import {
+  EventBus,
+  type EventDispatchOptions,
+  type EventPayload,
+} from '../event-bus.js';
+import {
+  async_playwright,
+  type Browser,
+  type BrowserContext,
+  type Page,
+  type Locator,
+} from './types.js';
+import {
+  BrowserProfile,
+  CHROME_DOCKER_ARGS,
+  type BrowserProfileOptions,
+  DEFAULT_BROWSER_PROFILE,
+} from './profile.js';
+import {
+  BrowserStateSummary,
+  type NetworkRequest,
+  type TabInfo,
+  BrowserError,
+  URLNotAllowedError,
+} from './views.js';
+import {
+  AgentFocusChangedEvent,
+  BrowserConnectedEvent,
+  BrowserErrorEvent,
+  BrowserLaunchEvent,
+  BrowserReconnectedEvent,
+  BrowserReconnectingEvent,
+  BrowserStartEvent,
+  BrowserStoppedEvent,
+  BrowserStopEvent,
+  DialogOpenedEvent,
+  DownloadProgressEvent,
+  DownloadStartedEvent,
+  FileDownloadedEvent,
+  TabClosedEvent,
+  TabCreatedEvent,
+  type WaitUntilState,
+} from './events.js';
+import { DOMElementNode, DOMState, type SelectorMap } from '../dom/views.js';
+import { normalize_url } from './utils.js';
+import { DomService } from '../dom/service.js';
+import {
+  showDVDScreensaver,
+  showSpinner,
+  withDVDScreensaver,
+} from './dvd-screensaver.js';
+import { SessionManager } from './session-manager.js';
+import { AboutBlankWatchdog } from './watchdogs/aboutblank-watchdog.js';
+import {
+  CaptchaWatchdog,
+  type CaptchaWaitResult,
+} from './watchdogs/captcha-watchdog.js';
+import { CDPSessionWatchdog } from './watchdogs/cdp-session-watchdog.js';
+import { CrashWatchdog } from './watchdogs/crash-watchdog.js';
+import { DefaultActionWatchdog } from './watchdogs/default-action-watchdog.js';
+import { DOMWatchdog } from './watchdogs/dom-watchdog.js';
+import { DownloadsWatchdog } from './watchdogs/downloads-watchdog.js';
+import { HarRecordingWatchdog } from './watchdogs/har-recording-watchdog.js';
+import { LocalBrowserWatchdog } from './watchdogs/local-browser-watchdog.js';
+import { PermissionsWatchdog } from './watchdogs/permissions-watchdog.js';
+import { PopupsWatchdog } from './watchdogs/popups-watchdog.js';
+import { RecordingWatchdog } from './watchdogs/recording-watchdog.js';
+import { ScreenshotWatchdog } from './watchdogs/screenshot-watchdog.js';
+import { SecurityWatchdog } from './watchdogs/security-watchdog.js';
+import { StorageStateWatchdog } from './watchdogs/storage-state-watchdog.js';
+import type { BaseWatchdog } from './watchdogs/base.js';
+import {
+  MAX_BROWSER_TIMER_DELAY_MS,
+  MAX_BROWSER_TIMER_DELAY_SECONDS,
+} from './timeouts.js';
+
+const execFileAsync = promisify(execFile);
+const PLAYWRIGHT_OPTION_KEY_OVERRIDES: Record<string, string> = {
+  extra_http_headers: 'extraHTTPHeaders',
+};
+const DOMAIN_POLICY_UNFILTERABLE_RECORDING_KEYS = new Set([
+  'record_video_dir',
+  'record_video_size',
+  'record_video',
+  'recordVideo',
+]);
+const EMPTY_DOM_RETRY_DELAY_MS = 250;
+const REMOTE_RECONNECT_DELAYS_MS = [1000, 2000, 4000] as const;
+const REMOTE_RECONNECT_ATTEMPT_TIMEOUT_MS = 15_000;
+
+const requireFiniteBrowserActionNumber = (value: number, name: string) => {
+  if (!Number.isFinite(value) || Math.abs(value) > Number.MAX_SAFE_INTEGER) {
+    throw new BrowserError(`${name} must be a finite safe number`);
+  }
+  return value;
+};
+
+const requireBrowserTimeoutMs = (value: number, name: string) => {
+  if (
+    !Number.isFinite(value) ||
+    value < 0 ||
+    value > MAX_BROWSER_TIMER_DELAY_MS
+  ) {
+    throw new BrowserError(
+      `${name} must be between 0 and ${MAX_BROWSER_TIMER_DELAY_MS} milliseconds`
+    );
+  }
+  return value;
+};
+
+const optionalBrowserTimeoutMs = (
+  value: number | null | undefined,
+  name: string
+) =>
+  value === null || value === undefined
+    ? null
+    : requireBrowserTimeoutMs(value, name);
+
+const requireBrowserTimeoutSeconds = (value: number, name: string) => {
+  if (
+    !Number.isFinite(value) ||
+    value < 0 ||
+    value > MAX_BROWSER_TIMER_DELAY_SECONDS
+  ) {
+    throw new BrowserError(
+      `${name} must be between 0 and ${MAX_BROWSER_TIMER_DELAY_SECONDS} seconds`
+    );
+  }
+  return value;
+};
+
+const chmodPrivateFileBestEffort = (filePath: string) => {
+  if (process.platform === 'win32') {
+    return;
+  }
+  try {
+    fs.chmodSync(filePath, 0o600);
+  } catch {
+    /* best effort */
+  }
+};
+
+const ensurePrivateDirectoryIfCreated = (dirPath: string) => {
+  const existed = fs.existsSync(dirPath);
+  fs.mkdirSync(dirPath, { recursive: true, mode: 0o700 });
+  if (!existed && process.platform !== 'win32') {
+    try {
+      fs.chmodSync(dirPath, 0o700);
+    } catch {
+      /* best effort */
+    }
+  }
+};
+
+type SystemChromeVariant =
+  | 'chrome'
+  | 'chrome-canary'
+  | 'chrome-beta'
+  | 'chrome-unstable'
+  | 'chromium';
+
+type BrowserEventEmitterLike = Browser & {
+  on?: (event: string, listener: (...args: any[]) => void) => void;
+  off?: (event: string, listener: (...args: any[]) => void) => void;
+  removeListener?: (event: string, listener: (...args: any[]) => void) => void;
+  isConnected?: () => boolean;
+};
+
+export interface BrowserSessionInit {
+  id?: string;
+  browser_profile?: BrowserProfile;
+  profile?: Partial<BrowserProfileOptions>;
+  browser?: Browser | null;
+  browser_context?: BrowserContext | null;
+  page?: Page | null;
+  title?: string | null;
+  url?: string | null;
+  wss_url?: string | null;
+  cdp_url?: string | null;
+  browser_pid?: number | null;
+  playwright?: unknown;
+  downloaded_files?: string[];
+  closed_popup_messages?: string[];
+}
+
+export interface ChromeProfileInfo {
+  directory: string;
+  name: string;
+  email?: string;
+}
+
+const cloneBrowserProfileConfig = (profile: BrowserProfile) =>
+  typeof structuredClone === 'function'
+    ? structuredClone(profile.config)
+    : JSON.parse(JSON.stringify(profile.config));
+
+const detectSystemChromeVariant = (
+  executablePath: string | null | undefined
+): SystemChromeVariant => {
+  const normalizedPath = String(executablePath ?? '')
+    .trim()
+    .toLowerCase();
+  if (!normalizedPath) {
+    return 'chrome';
+  }
+  if (normalizedPath.includes('chromium')) {
+    return 'chromium';
+  }
+  if (
+    normalizedPath.includes('chrome canary') ||
+    normalizedPath.includes('chrome sxs')
+  ) {
+    return 'chrome-canary';
+  }
+  if (normalizedPath.includes('google-chrome-beta')) {
+    return 'chrome-beta';
+  }
+  if (normalizedPath.includes('google-chrome-unstable')) {
+    return 'chrome-unstable';
+  }
+  return 'chrome';
+};
+
+export const systemChrome = {
+  findExecutable(): string | null {
+    if (process.platform === 'darwin') {
+      const candidates = [
+        '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+        '/Applications/Chromium.app/Contents/MacOS/Chromium',
+        '/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary',
+      ];
+      return candidates.find((candidate) => fs.existsSync(candidate)) ?? null;
+    }
+
+    if (process.platform === 'linux') {
+      const commands = [
+        'google-chrome',
+        'google-chrome-stable',
+        'google-chrome-beta',
+        'google-chrome-unstable',
+        'chromium',
+        'chromium-browser',
+      ];
+      for (const command of commands) {
+        try {
+          const resolved = execFileSync('which', [command], {
+            encoding: 'utf8',
+            stdio: ['ignore', 'pipe', 'ignore'],
+          }).trim();
+          if (resolved) {
+            return resolved;
+          }
+        } catch {
+          // Ignore missing commands and try the next candidate.
+        }
+      }
+      return null;
+    }
+
+    if (process.platform === 'win32') {
+      const candidates = [
+        path.join(
+          process.env.ProgramFiles ?? 'C:\\Program Files',
+          'Google',
+          'Chrome',
+          'Application',
+          'chrome.exe'
+        ),
+        path.join(
+          process.env['ProgramFiles(x86)'] ?? 'C:\\Program Files (x86)',
+          'Google',
+          'Chrome',
+          'Application',
+          'chrome.exe'
+        ),
+        path.join(
+          process.env.LOCALAPPDATA ?? '',
+          'Google',
+          'Chrome',
+          'Application',
+          'chrome.exe'
+        ),
+        path.join(
+          process.env.LOCALAPPDATA ?? '',
+          'Google',
+          'Chrome SxS',
+          'Application',
+          'chrome.exe'
+        ),
+        path.join(
+          process.env.LOCALAPPDATA ?? '',
+          'Chromium',
+          'Application',
+          'chrome.exe'
+        ),
+        path.join(
+          process.env.ProgramFiles ?? 'C:\\Program Files',
+          'Chromium',
+          'Application',
+          'chrome.exe'
+        ),
+        path.join(
+          process.env['ProgramFiles(x86)'] ?? 'C:\\Program Files (x86)',
+          'Chromium',
+          'Application',
+          'chrome.exe'
+        ),
+      ];
+      return candidates.find((candidate) => fs.existsSync(candidate)) ?? null;
+    }
+
+    return null;
+  },
+
+  getUserDataDir(
+    executablePath: string | null = systemChrome.findExecutable()
+  ): string | null {
+    const variant = detectSystemChromeVariant(executablePath);
+    if (process.platform === 'darwin') {
+      const applicationSupportDir = path.join(
+        os.homedir(),
+        'Library',
+        'Application Support'
+      );
+      if (variant === 'chromium') {
+        return path.join(applicationSupportDir, 'Chromium');
+      }
+      if (variant === 'chrome-canary') {
+        return path.join(applicationSupportDir, 'Google', 'Chrome Canary');
+      }
+      return path.join(applicationSupportDir, 'Google', 'Chrome');
+    }
+    if (process.platform === 'linux') {
+      if (variant === 'chromium') {
+        return path.join(os.homedir(), '.config', 'chromium');
+      }
+      if (variant === 'chrome-beta') {
+        return path.join(os.homedir(), '.config', 'google-chrome-beta');
+      }
+      if (variant === 'chrome-unstable') {
+        return path.join(os.homedir(), '.config', 'google-chrome-unstable');
+      }
+      return path.join(os.homedir(), '.config', 'google-chrome');
+    }
+    if (process.platform === 'win32') {
+      const localAppData =
+        process.env.LOCALAPPDATA ?? path.join(os.homedir(), 'AppData', 'Local');
+      if (variant === 'chromium') {
+        return path.join(localAppData, 'Chromium', 'User Data');
+      }
+      if (variant === 'chrome-canary') {
+        return path.join(localAppData, 'Google', 'Chrome SxS', 'User Data');
+      }
+      return path.join(localAppData, 'Google', 'Chrome', 'User Data');
+    }
+    return null;
+  },
+
+  listProfiles(userDataDir: string | null = systemChrome.getUserDataDir()) {
+    if (!userDataDir) {
+      return [] as ChromeProfileInfo[];
+    }
+
+    const localStatePath = path.join(userDataDir, 'Local State');
+    if (!fs.existsSync(localStatePath)) {
+      return [] as ChromeProfileInfo[];
+    }
+
+    try {
+      const raw = fs.readFileSync(localStatePath, 'utf8');
+      const localState = JSON.parse(raw) as {
+        profile?: {
+          info_cache?: Record<string, { name?: string; user_name?: string }>;
+        };
+      };
+      const infoCache = localState.profile?.info_cache ?? {};
+      return Object.entries(infoCache)
+        .map(([directory, info]) => ({
+          directory,
+          name: info?.name || directory,
+          email: info?.user_name || '',
+        }))
+        .sort((left, right) => left.directory.localeCompare(right.directory));
+    } catch {
+      return [] as ChromeProfileInfo[];
+    }
+  },
+};
+
+export interface BrowserSessionFromSystemChromeInit extends Omit<
+  BrowserSessionInit,
+  'browser_profile' | 'profile'
+> {
+  browser_profile?: BrowserProfile;
+  profile?: Partial<BrowserProfileOptions>;
+  profile_directory?: string | null;
+}
+
+const createEmptyDomState = (): DOMState => {
+  const root = new DOMElementNode(true, null, 'html', '/html[1]', {}, []);
+  return new DOMState(root, {} as SelectorMap);
+};
+
+/**
+ * Cached clickable elements hashes for the last state
+ * Used to reduce token usage by tracking which elements are new
+ */
+interface CachedClickableElementHashes {
+  url: string;
+  hashes: Set<string>;
+}
+
+export interface BrowserStateOptions {
+  cache_clickable_elements_hashes?: boolean;
+  include_screenshot?: boolean;
+  include_recent_events?: boolean;
+  signal?: AbortSignal | null;
+}
+
+export interface BrowserActionOptions {
+  signal?: AbortSignal | null;
+  clear?: boolean;
+}
+
+export interface BrowserNavigationOptions extends BrowserActionOptions {
+  wait_until?: WaitUntilState;
+  timeout_ms?: number | null;
+}
+
+interface RecentBrowserEvent {
+  event_type: string;
+  timestamp: string;
+  url?: string;
+  error_message?: string;
+  page_id?: number;
+  tab_id?: string;
+}
+
+interface PageLoadingStatuses {
+  document: string | null;
+  network: string | null;
+}
+
+export class BrowserSession {
+  readonly id: string;
+  readonly browser_profile: BrowserProfile;
+  readonly event_bus: EventBus;
+  readonly session_manager: SessionManager;
+  browser: Browser | null;
+  browser_context: BrowserContext | null;
+  agent_current_page: Page | null;
+  human_current_page: Page | null;
+  initialized = false;
+  wss_url: string | null;
+  cdp_url: string | null;
+  browser_pid: number | null;
+  playwright: unknown;
+  private cachedBrowserState: BrowserStateSummary | null = null;
+  private _cachedClickableElementHashes: CachedClickableElementHashes | null =
+    null;
+  private currentUrl: string;
+  private currentTitle: string;
+  private _logger: ReturnType<typeof createLogger> | null = null;
+  private _tabCounter = 0;
+  private _tabs: TabInfo[] = [];
+  private currentTabIndex = 0;
+  private historyStack: string[] = [];
+  downloaded_files: string[] = [];
+  llm_screenshot_size: [number, number] | null = null;
+  _original_viewport_size: [number, number] | null = null;
+  private ownsBrowserResources = true;
+  private _autoDownloadPdfs = true;
+  private tabPages = new Map<number, Page | null>();
+  private currentPageLoadingStatus: string | null = null;
+  private pageLoadingStatuses = new WeakMap<Page, PageLoadingStatuses>();
+  private _subprocess: ChildProcess | null = null;
+  private _childProcesses: Set<number> = new Set();
+  private _browserLaunchToken: string | null = null;
+  private attachedAgentId: string | null = null;
+  private attachedSharedAgentIds: Set<string> = new Set();
+  private _stoppingPromise: Promise<void> | null = null;
+  private _closedPopupMessages: string[] = [];
+  private _dialogHandlersAttached = new WeakSet<Page>();
+  private readonly _maxClosedPopupMessages = 20;
+  private _recentEvents: RecentBrowserEvent[] = [];
+  private readonly _maxRecentEvents = 100;
+  private _watchdogs: Set<BaseWatchdog> = new Set();
+  private _defaultWatchdogsAttached = false;
+  private _captchaWatchdog: CaptchaWatchdog | null = null;
+  private _scopedExtraHeadersRouteContext: BrowserContext | null = null;
+  private _scopedExtraHeadersRouteHandler:
+    | ((route: any) => Promise<void>)
+    | null = null;
+  readonly RECONNECT_WAIT_TIMEOUT = 54;
+  private _reconnecting = false;
+  private _reconnectTask: Promise<void> | null = null;
+  private _reconnectWaitPromise: Promise<void> = Promise.resolve();
+  private _resolveReconnectWait: (() => void) | null = null;
+  private _intentionalStop = false;
+  private _disconnectAwareBrowser: BrowserEventEmitterLike | null = null;
+  private _browserDisconnectHandler: (() => void) | null = null;
+
+  constructor(init: BrowserSessionInit = {}) {
+    const sourceProfileConfig = init.browser_profile
+      ? cloneBrowserProfileConfig(init.browser_profile)
+      : (init.profile ?? {});
+    this.browser_profile = new BrowserProfile(sourceProfileConfig);
+    this.id = init.id ?? uuid7str();
+    this.event_bus = new EventBus(`BrowserSession_${this.id.slice(-4)}`);
+    this.session_manager = new SessionManager();
+    this.browser = init.browser ?? null;
+    this.browser_context = init.browser_context ?? null;
+    this.agent_current_page = init.page ?? null;
+    this.human_current_page = init.page ?? null;
+    this.currentUrl = normalize_url(init.url ?? 'about:blank');
+    this.currentTitle = boundBrowserStateTitle(init.title ?? '');
+    this.wss_url = init.wss_url ?? null;
+    this.cdp_url = init.cdp_url ?? null;
+    this.browser_pid = init.browser_pid ?? null;
+    this.playwright = init.playwright ?? null;
+    this.downloaded_files = Array.isArray(init.downloaded_files)
+      ? [...init.downloaded_files]
+      : [];
+    this._closedPopupMessages = Array.isArray(init.closed_popup_messages)
+      ? init.closed_popup_messages
+          .slice(-this._maxClosedPopupMessages)
+          .map((message) =>
+            boundBrowserStateText(message, MAX_BROWSER_STATE_MESSAGE_CHARS)
+          )
+      : [];
+    if (typeof (init as any)?.auto_download_pdfs === 'boolean') {
+      this._autoDownloadPdfs = Boolean((init as any).auto_download_pdfs);
+    }
+    const initialPageId = this._tabCounter++;
+    this._tabs = [
+      this._createTabInfo({
+        page_id: initialPageId,
+        url: this.currentUrl,
+        title: this.currentTitle || this.currentUrl,
+      }),
+    ];
+    this.historyStack.push(this.currentUrl);
+    this.ownsBrowserResources = this._determineOwnership();
+    this.tabPages.set(this._tabs[0].page_id, this.agent_current_page ?? null);
+    this._syncSessionManagerFromTabs();
+    this._attachDialogHandler(this.agent_current_page);
+    this._recordRecentEvent('session_initialized', { url: this.currentUrl });
+  }
+
+  static from_system_chrome(
+    init: BrowserSessionFromSystemChromeInit = {}
+  ): BrowserSession {
+    const executablePath = systemChrome.findExecutable();
+    if (!executablePath) {
+      throw new Error(
+        'Chrome not found. Please install Chrome or use BrowserSession with an explicit executable_path.\n' +
+          'Expected locations:\n' +
+          '  macOS: /Applications/Google Chrome.app/Contents/MacOS/Google Chrome\n' +
+          '  Linux: /usr/bin/google-chrome or /usr/bin/chromium\n' +
+          '  Windows: C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
+      );
+    }
+
+    const userDataDir = systemChrome.getUserDataDir(executablePath);
+    if (!userDataDir) {
+      throw new Error(
+        'Could not detect Chrome profile directory for your platform.\n' +
+          'Expected locations:\n' +
+          '  macOS: ~/Library/Application Support/Google/Chrome\n' +
+          '  Linux: ~/.config/google-chrome\n' +
+          '  Windows: %LocalAppData%\\Google\\Chrome\\User Data'
+      );
+    }
+
+    const availableProfiles = systemChrome.listProfiles(userDataDir);
+    const selectedProfileDirectory =
+      init.profile_directory ?? availableProfiles[0]?.directory ?? 'Default';
+
+    if (typeof init.profile_directory === 'undefined' && availableProfiles[0]) {
+      createLogger('browser_use.browser.session').info(
+        `Auto-selected Chrome profile: ${availableProfiles[0].name} (${availableProfiles[0].directory})`
+      );
+    }
+
+    const sourceProfileConfig = init.browser_profile
+      ? cloneBrowserProfileConfig(init.browser_profile)
+      : (init.profile ?? {});
+    const {
+      browser_profile: _browserProfile,
+      profile: _profile,
+      profile_directory: _profileDirectory,
+      ...sessionInit
+    } = init;
+
+    return new BrowserSession({
+      ...sessionInit,
+      browser_profile: new BrowserProfile({
+        ...sourceProfileConfig,
+        executable_path: executablePath,
+        user_data_dir: userDataDir,
+        profile_directory: selectedProfileDirectory,
+      }),
+    });
+  }
+
+  static list_chrome_profiles(): ChromeProfileInfo[] {
+    const executablePath = systemChrome.findExecutable();
+    const userDataDir = systemChrome.getUserDataDir(executablePath);
+    return systemChrome.listProfiles(userDataDir);
+  }
+
+  attach_watchdog(watchdog: BaseWatchdog) {
+    if (this._watchdogs.has(watchdog)) {
+      return;
+    }
+    watchdog.attach_to_session();
+    this._watchdogs.add(watchdog);
+    if (watchdog instanceof CaptchaWatchdog) {
+      this._captchaWatchdog = watchdog;
+    }
+  }
+
+  attach_watchdogs(watchdogs: BaseWatchdog[]) {
+    for (const watchdog of watchdogs) {
+      this.attach_watchdog(watchdog);
+    }
+  }
+
+  detach_watchdog(watchdog: BaseWatchdog) {
+    if (!this._watchdogs.has(watchdog)) {
+      return;
+    }
+    watchdog.detach_from_session();
+    this._watchdogs.delete(watchdog);
+    if (watchdog === this._captchaWatchdog) {
+      this._captchaWatchdog = null;
+    }
+  }
+
+  detach_all_watchdogs() {
+    for (const watchdog of [...this._watchdogs]) {
+      this.detach_watchdog(watchdog);
+    }
+    this._defaultWatchdogsAttached = false;
+    this._captchaWatchdog = null;
+  }
+
+  get_watchdogs() {
+    return [...this._watchdogs];
+  }
+
+  async dispatch_browser_event<TEvent extends EventPayload>(
+    event: TEvent,
+    options: Omit<EventDispatchOptions, 'throw_on_error'> = {}
+  ) {
+    return this.event_bus.dispatch_or_throw(event, options);
+  }
+
+  async launch() {
+    this.attach_default_watchdogs();
+    const dispatchResult = await this.dispatch_browser_event(
+      new BrowserLaunchEvent()
+    );
+    const eventResult = dispatchResult.event.event_result as
+      | { cdp_url?: string | null }
+      | null
+      | undefined;
+    return {
+      cdp_url:
+        eventResult?.cdp_url ?? this.cdp_url ?? this.wss_url ?? 'playwright',
+    };
+  }
+
+  attach_default_watchdogs() {
+    if (this._defaultWatchdogsAttached) {
+      return;
+    }
+    const watchdogs: BaseWatchdog[] = [
+      new LocalBrowserWatchdog({ browser_session: this }),
+      new CDPSessionWatchdog({ browser_session: this }),
+      new CrashWatchdog({ browser_session: this }),
+      new AboutBlankWatchdog({ browser_session: this }),
+      new PermissionsWatchdog({ browser_session: this }),
+      new PopupsWatchdog({ browser_session: this }),
+      new SecurityWatchdog({ browser_session: this }),
+      new DOMWatchdog({ browser_session: this }),
+      new ScreenshotWatchdog({ browser_session: this }),
+      new RecordingWatchdog({ browser_session: this }),
+      new DownloadsWatchdog({ browser_session: this }),
+      new StorageStateWatchdog({ browser_session: this }),
+      new DefaultActionWatchdog({ browser_session: this }),
+    ];
+
+    if (this.browser_profile.config.captcha_solver) {
+      this._captchaWatchdog = new CaptchaWatchdog({ browser_session: this });
+      watchdogs.push(this._captchaWatchdog);
+    }
+
+    const configuredHarPath = this.browser_profile.config.record_har_path;
+    if (
+      typeof configuredHarPath === 'string' &&
+      configuredHarPath.trim().length > 0
+    ) {
+      watchdogs.push(new HarRecordingWatchdog({ browser_session: this }));
+    }
+
+    this.attach_watchdogs(watchdogs);
+    this._defaultWatchdogsAttached = true;
+  }
+
+  async wait_if_captcha_solving(
+    timeoutSeconds?: number
+  ): Promise<CaptchaWaitResult | null> {
+    return (
+      this._captchaWatchdog?.wait_if_captcha_solving(timeoutSeconds) ?? null
+    );
+  }
+
+  private _formatTabId(pageId: number): string {
+    const normalized =
+      Number.isFinite(pageId) && pageId >= 0 ? Math.floor(pageId) : 0;
+    return String(normalized).padStart(4, '0').slice(-4);
+  }
+
+  private _createTabInfo({
+    page_id,
+    url,
+    title,
+    parent_page_id = null,
+  }: {
+    page_id: number;
+    url: string;
+    title: string;
+    parent_page_id?: number | null;
+  }): TabInfo {
+    return {
+      page_id,
+      tab_id: this._formatTabId(page_id),
+      target_id: this._buildSyntheticTargetId(page_id),
+      url,
+      title: boundBrowserStateTitle(title),
+      parent_page_id,
+    };
+  }
+
+  private _buildSyntheticTargetId(pageId: number) {
+    return `tab_${this.id.slice(-4)}_${this._formatTabId(pageId)}`;
+  }
+
+  private _syncSessionManagerFromTabs() {
+    this.session_manager.sync_tabs(
+      this._tabs,
+      this.currentTabIndex,
+      (page_id) => this._buildSyntheticTargetId(page_id)
+    );
+  }
+
+  async get_or_create_cdp_session(page: Page | null = null): Promise<any> {
+    if (!this.browser_context?.newCDPSession) {
+      throw new Error(
+        'CDP sessions are not available for this browser context'
+      );
+    }
+
+    const targetPage = page ?? (await this.get_current_page());
+    if (!targetPage) {
+      throw new Error('No active page available to create CDP session');
+    }
+
+    return this.browser_context.newCDPSession(targetPage);
+  }
+
+  private async _waitForStableNetwork(
+    page: Page,
+    signal: AbortSignal | null = null
+  ) {
+    const pendingRequests = new Set<any>();
+    let lastActivity = Date.now() / 1000;
+
+    // Relevant resource types that indicate page loading progress
+    const relevantResourceTypes = new Set([
+      'document',
+      'stylesheet',
+      'image',
+      'font',
+      'script',
+      'iframe',
+    ]);
+    const ignoredResourceTypes = new Set([
+      'websocket',
+      'media',
+      'eventsource',
+      'manifest',
+      'other',
+    ]);
+
+    // Expanded URL pattern filters - more comprehensive blocking
+    const ignoredUrlPatterns = [
+      'analytics',
+      'tracking',
+      'telemetry',
+      'beacon',
+      'metrics',
+      'doubleclick',
+      'adsystem',
+      'adserver',
+      'advertising',
+      'facebook.com/plugins',
+      'platform.twitter',
+      'linkedin.com/embed',
+      'livechat',
+      'zendesk',
+      'intercom',
+      'crisp.chat',
+      'hotjar',
+      'push-notifications',
+      'onesignal',
+      'pushwoosh',
+      'heartbeat',
+      'ping',
+      'alive',
+      'webrtc',
+      'rtmp://',
+      'wss://',
+      'cloudfront.net/assets',
+      'fastly.net',
+    ];
+
+    // Content types that should be filtered
+    const relevantContentTypes = new Set([
+      'text/html',
+      'text/css',
+      'application/javascript',
+      'application/x-javascript',
+      'text/javascript',
+      'image/png',
+      'image/jpeg',
+      'image/gif',
+      'image/webp',
+      'image/svg+xml',
+      'font/woff',
+      'font/woff2',
+      'application/font-woff',
+      'application/font-woff2',
+    ]);
+
+    // Streaming media content types to ignore
+    const streamingContentTypes = new Set([
+      'video/',
+      'audio/',
+      'application/octet-stream',
+      'application/x-mpegurl',
+      'application/vnd.apple.mpegurl',
+    ]);
+
+    // Max response size to track (5MB)
+    const maxResponseSize = 5 * 1024 * 1024;
+
+    const onRequest = (request: any) => {
+      const resourceType = request.resourceType?.() ?? request.resourceType;
+      if (!resourceType || !relevantResourceTypes.has(resourceType)) {
+        return;
+      }
+      if (ignoredResourceTypes.has(resourceType)) {
+        return;
+      }
+
+      const url =
+        request.url?.().toLowerCase?.() ?? request.url?.toLowerCase?.() ?? '';
+
+      // Filter data URLs and blob URLs
+      if (url.startsWith('data:') || url.startsWith('blob:')) {
+        return;
+      }
+
+      // Filter by URL patterns
+      if (
+        ignoredUrlPatterns.some((pattern) =>
+          url.includes(pattern.toLowerCase())
+        )
+      ) {
+        return;
+      }
+
+      // Filter prefetch requests
+      const headers = request.headers?.() ?? request.headers ?? {};
+      const purpose = headers['purpose'] || headers['sec-fetch-dest'];
+      if (purpose === 'prefetch' || headers['x-moz'] === 'prefetch') {
+        return;
+      }
+
+      pendingRequests.add(request);
+      lastActivity = Date.now() / 1000;
+    };
+
+    const onResponse = async (response: any) => {
+      const request = response.request?.() ?? response.request;
+      if (!pendingRequests.has(request)) {
+        return;
+      }
+
+      try {
+        // Check Content-Type header
+        const headers = response.headers?.() ?? response.headers ?? {};
+        const contentType =
+          headers['content-type'] || headers['Content-Type'] || '';
+
+        // Filter streaming media
+        if (streamingContentTypes.has(contentType.split(';')[0].trim())) {
+          pendingRequests.delete(request);
+          return;
+        }
+
+        // Check if content type is relevant
+        const baseContentType = contentType.split(';')[0].trim();
+        const isRelevant = Array.from(relevantContentTypes).some(
+          (ct) =>
+            baseContentType.startsWith(ct) || ct.startsWith(baseContentType)
+        );
+
+        if (contentType && !isRelevant) {
+          // Unknown content type, still track but log it
+          this.logger.debug(
+            `Tracking unknown content type: ${baseContentType}`
+          );
+        }
+
+        // Check response size (if available)
+        const contentLength =
+          headers['content-length'] || headers['Content-Length'];
+        if (contentLength && parseInt(contentLength, 10) > maxResponseSize) {
+          const requestUrl =
+            typeof request?.url === 'function'
+              ? request.url()
+              : String(request?.url ?? '');
+          this.logger.debug(
+            `Skipping large response (${contentLength} bytes): ${BrowserSession._redact_url_for_logging(
+              requestUrl
+            )}`
+          );
+          pendingRequests.delete(request);
+          return;
+        }
+      } catch (error) {
+        // If header inspection fails, still process the response
+        this.logger.debug(
+          `Error inspecting response headers: ${(error as Error).message}`
+        );
+      }
+
+      pendingRequests.delete(request);
+      lastActivity = Date.now() / 1000;
+    };
+
+    const waitForIdle = async () => {
+      const startTime = Date.now() / 1000;
+      while (true) {
+        this._throwIfAborted(signal);
+        await this._waitWithAbort(100, signal);
+        this._throwIfAborted(signal);
+        const now = Date.now() / 1000;
+        if (
+          pendingRequests.size === 0 &&
+          now - lastActivity >=
+            (this.browser_profile.wait_for_network_idle_page_load_time ?? 0.5)
+        ) {
+          this._setPageLoadingStatus(page, 'network', null);
+          break;
+        }
+        if (
+          now - startTime >
+          (this.browser_profile.maximum_wait_page_load_time ?? 5)
+        ) {
+          this._setPageLoadingStatus(
+            page,
+            'network',
+            `Page loading was aborted after ${this.browser_profile.maximum_wait_page_load_time ?? 5}s with ${pendingRequests.size} pending network requests. You may want to use the wait action to allow more time for the page to fully load.`
+          );
+          break;
+        }
+      }
+    };
+
+    if (typeof page?.on === 'function' && typeof page?.off === 'function') {
+      page.on('request', onRequest);
+      page.on('response', onResponse);
+      try {
+        await waitForIdle();
+      } finally {
+        page.off('request', onRequest);
+        page.off('response', onResponse);
+      }
+    } else {
+      this._setPageLoadingStatus(page, 'network', null);
+    }
+  }
+
+  private _getPageLoadingStatus(page: Page | null): string | null {
+    if (!page) {
+      return null;
+    }
+    const statuses = this.pageLoadingStatuses.get(page);
+    if (!statuses) {
+      return null;
+    }
+    const messages = [statuses.document, statuses.network].filter(
+      (message): message is string => Boolean(message)
+    );
+    return messages.length > 0 ? messages.join(' ') : null;
+  }
+
+  private _setPageLoadingStatus(
+    page: Page,
+    kind: keyof PageLoadingStatuses,
+    status: string | null
+  ) {
+    const statuses = this.pageLoadingStatuses.get(page) ?? {
+      document: null,
+      network: null,
+    };
+    statuses[kind] = status;
+    this.pageLoadingStatuses.set(page, statuses);
+    if (page === this.agent_current_page) {
+      this.currentPageLoadingStatus = this._getPageLoadingStatus(page);
+    }
+  }
+
+  private _resetPageLoadingStatus(page: Page | null) {
+    if (page) {
+      this.pageLoadingStatuses.set(page, {
+        document: null,
+        network: null,
+      });
+    }
+    if (page === this.agent_current_page) {
+      this.currentPageLoadingStatus = null;
+    }
+  }
+
+  private _assignAgentCurrentPage(page: Page | null) {
+    const nextPage = page ?? null;
+    this._attachDialogHandler(nextPage);
+    this.agent_current_page = nextPage;
+    this.currentPageLoadingStatus = this._getPageLoadingStatus(nextPage);
+  }
+
+  private _setActivePage(page: Page | null) {
+    const currentTab = this._tabs[this.currentTabIndex];
+    if (currentTab) {
+      this.tabPages.set(currentTab.page_id, page ?? null);
+      this.session_manager.set_focused_target(currentTab.target_id ?? null);
+    }
+    this._assignAgentCurrentPage(page);
+  }
+
+  private async _syncCurrentTabFromPage(page: Page | null) {
+    if (!page) {
+      return;
+    }
+
+    let resolvedUrl: string | null = null;
+    try {
+      const rawUrl = page.url();
+      if (typeof rawUrl === 'string' && rawUrl.trim()) {
+        resolvedUrl = normalize_url(rawUrl);
+        this.currentUrl = resolvedUrl;
+      }
+    } catch {
+      // Ignore transient URL read failures.
+    }
+
+    let resolvedTitle: string | null = null;
+    if (typeof page.title === 'function') {
+      try {
+        const title = await readBoundedPageTitle(page);
+        if (typeof title === 'string' && title.trim()) {
+          resolvedTitle = title;
+        }
+      } catch {
+        // Ignore transient title read failures.
+      }
+    }
+    if (!resolvedTitle) {
+      resolvedTitle = resolvedUrl ?? this.currentTitle ?? this.currentUrl;
+    }
+    this.currentTitle = boundBrowserStateTitle(resolvedTitle);
+
+    const currentTab = this._tabs[this.currentTabIndex];
+    if (currentTab) {
+      if (resolvedUrl) {
+        currentTab.url = resolvedUrl;
+      }
+      currentTab.title = boundBrowserStateTitle(resolvedTitle);
+      this._syncSessionManagerFromTabs();
+    }
+  }
+
+  private _syncTabsWithBrowserPages() {
+    const pages = this.browser_context?.pages?.() ?? [];
+    if (!pages.length) {
+      return;
+    }
+
+    const nextTabs: TabInfo[] = [];
+    const nextTabPages = new Map<number, Page | null>();
+    const usedPageIds = new Set<number>();
+    const knownPageMappings = Array.from(this.tabPages.entries());
+
+    for (const page of pages) {
+      this._attachDialogHandler(page ?? null);
+
+      let pageId: number | null = null;
+      for (const [candidateId, candidatePage] of knownPageMappings) {
+        if (candidatePage === page && !usedPageIds.has(candidateId)) {
+          pageId = candidateId;
+          break;
+        }
+      }
+
+      if (pageId === null) {
+        pageId = this._tabCounter++;
+      }
+      usedPageIds.add(pageId);
+
+      const existingTab = this._tabs.find((tab) => tab.page_id === pageId);
+      const tab = existingTab
+        ? { ...existingTab }
+        : this._createTabInfo({
+            page_id: pageId,
+            url: 'about:blank',
+            title: 'about:blank',
+          });
+
+      try {
+        const rawUrl = page.url();
+        if (typeof rawUrl === 'string' && rawUrl.trim()) {
+          tab.url = normalize_url(rawUrl);
+        }
+      } catch {
+        // Keep existing tab url when page url is not readable.
+      }
+      if (!existingTab || !tab.title || tab.title === 'about:blank') {
+        tab.title = boundBrowserStateTitle(tab.url);
+      }
+
+      nextTabs.push(tab);
+      nextTabPages.set(pageId, page);
+    }
+
+    if (!nextTabs.length) {
+      return;
+    }
+
+    this._tabs = nextTabs;
+    this.tabPages = nextTabPages;
+
+    const activePage =
+      this.agent_current_page && pages.includes(this.agent_current_page)
+        ? this.agent_current_page
+        : (pages[0] ?? null);
+    if (activePage) {
+      const activeIndex = this._tabs.findIndex(
+        (tab) => this.tabPages.get(tab.page_id) === activePage
+      );
+      if (activeIndex !== -1) {
+        this.currentTabIndex = activeIndex;
+      }
+    }
+
+    if (this.currentTabIndex < 0 || this.currentTabIndex >= this._tabs.length) {
+      this.currentTabIndex = Math.max(0, this._tabs.length - 1);
+    }
+
+    const activeTab = this._tabs[this.currentTabIndex] ?? null;
+    if (activeTab) {
+      this.currentUrl = activeTab.url;
+      this.currentTitle = boundBrowserStateTitle(
+        activeTab.title || activeTab.url
+      );
+      this._assignAgentCurrentPage(
+        this.tabPages.get(activeTab.page_id) ?? null
+      );
+      this.human_current_page =
+        this.human_current_page ?? this.agent_current_page;
+    }
+    this._syncSessionManagerFromTabs();
+  }
+
+  private _captureClosedPopupMessage(dialogType: string, message: string) {
+    const normalizedType = boundBrowserStateText(
+      String(dialogType || 'alert').trim() || 'alert',
+      128
+    );
+    const normalizedMessage = boundBrowserStateText(
+      String(message || '').trim(),
+      MAX_BROWSER_STATE_MESSAGE_CHARS
+    );
+    if (!normalizedMessage) {
+      return;
+    }
+
+    const formatted = `[${normalizedType}] ${normalizedMessage}`;
+    this._closedPopupMessages.push(formatted);
+    if (this._closedPopupMessages.length > this._maxClosedPopupMessages) {
+      this._closedPopupMessages.splice(
+        0,
+        this._closedPopupMessages.length - this._maxClosedPopupMessages
+      );
+    }
+  }
+
+  private _getClosedPopupMessagesSnapshot() {
+    return [...this._closedPopupMessages];
+  }
+
+  private _recordRecentEvent(
+    event_type: string,
+    details: Partial<Omit<RecentBrowserEvent, 'event_type' | 'timestamp'>> = {}
+  ) {
+    const event: RecentBrowserEvent = {
+      event_type:
+        boundBrowserStateText(String(event_type || 'unknown').trim(), 128) ||
+        'unknown',
+      timestamp: new Date().toISOString(),
+    };
+    if (typeof details.url === 'string' && details.url.trim()) {
+      event.url = boundBrowserStateUrl(
+        BrowserSession._redact_url_for_logging(
+          details.url.slice(0, MAX_BROWSER_STATE_MESSAGE_CHARS).trim()
+        )
+      );
+    }
+    if (
+      typeof details.error_message === 'string' &&
+      details.error_message.trim()
+    ) {
+      event.error_message = BrowserSession._redact_urls_in_text(
+        details.error_message.slice(0, MAX_BROWSER_STATE_MESSAGE_CHARS).trim()
+      ).slice(0, MAX_BROWSER_STATE_MESSAGE_CHARS);
+    }
+    if (
+      typeof details.page_id === 'number' &&
+      Number.isFinite(details.page_id)
+    ) {
+      event.page_id = details.page_id;
+    }
+    if (typeof details.tab_id === 'string' && details.tab_id.trim()) {
+      event.tab_id = boundBrowserStateText(details.tab_id.trim(), 128);
+    }
+
+    this._recentEvents.push(event);
+    if (this._recentEvents.length > this._maxRecentEvents) {
+      this._recentEvents.splice(
+        0,
+        this._recentEvents.length - this._maxRecentEvents
+      );
+    }
+  }
+
+  private _getRecentEventsSummary(limit = 10): string | null {
+    if (!this._recentEvents.length || limit <= 0) {
+      return null;
+    }
+    const events = this._recentEvents.slice(-limit);
+    return JSON.stringify(events);
+  }
+
+  private _attachDialogHandler(page: Page | null) {
+    if (!page || this._dialogHandlersAttached.has(page)) {
+      return;
+    }
+
+    const pageWithEvents = page as unknown as {
+      on?: (event: string, handler: (...args: any[]) => void) => void;
+    };
+    if (typeof pageWithEvents.on !== 'function') {
+      return;
+    }
+
+    const handler = async (dialog: any) => {
+      try {
+        const dialogType =
+          typeof dialog?.type === 'function' ? dialog.type() : 'alert';
+        const boundedDialogType = boundBrowserStateText(dialogType, 128);
+        const message = boundBrowserStateText(
+          typeof dialog?.message === 'function' ? dialog.message() : '',
+          MAX_BROWSER_STATE_MESSAGE_CHARS
+        );
+        try {
+          await this.event_bus.dispatch(
+            new DialogOpenedEvent({
+              dialog_type: boundedDialogType,
+              message,
+              url: boundBrowserStateUrl(this.currentUrl ?? 'about:blank'),
+              frame_id: null,
+            })
+          );
+        } catch (error) {
+          this.logger.debug(
+            `Failed to dispatch DialogOpenedEvent: ${(error as Error).message}`
+          );
+        }
+        this._captureClosedPopupMessage(boundedDialogType, message);
+        this._recordRecentEvent('javascript_dialog_closed', {
+          url: this.currentUrl,
+          error_message: message
+            ? `[${boundedDialogType}] ${message.trim()}`
+            : `[${boundedDialogType}]`,
+        });
+
+        const shouldAccept =
+          boundedDialogType === 'alert' ||
+          boundedDialogType === 'confirm' ||
+          boundedDialogType === 'beforeunload';
+        if (shouldAccept && typeof dialog?.accept === 'function') {
+          await dialog.accept();
+        } else if (typeof dialog?.dismiss === 'function') {
+          await dialog.dismiss();
+        }
+      } catch (error) {
+        this.logger.debug(
+          `Failed to auto-handle JavaScript dialog: ${(error as Error).message}`
+        );
+      }
+    };
+
+    pageWithEvents.on('dialog', handler);
+    this._dialogHandlersAttached.add(page);
+  }
+
+  private async _getPendingNetworkRequests(
+    page: Page | null
+  ): Promise<NetworkRequest[]> {
+    if (!page || typeof page.evaluate !== 'function') {
+      return [];
+    }
+
+    await this.validate_page_after_action(page);
+    try {
+      const pending = await page.evaluate(() => {
+        const perf = (window as any).performance;
+        if (!perf?.getEntriesByType) {
+          return [];
+        }
+
+        const entries = perf.getEntriesByType('resource');
+        const now = perf.now?.() ?? Date.now();
+        const blockedPatterns = [
+          'doubleclick',
+          'analytics',
+          'tracking',
+          'metrics',
+          'telemetry',
+          'facebook.net',
+          'hotjar',
+          'clarity',
+          'mixpanel',
+          'segment',
+          '/beacon/',
+          '/collector/',
+          '/telemetry/',
+        ];
+        const pendingRequests: Array<{
+          url: string;
+          method: string;
+          loading_duration_ms: number;
+          resource_type: string | null;
+        }> = [];
+
+        for (const entry of entries) {
+          const responseEnd =
+            typeof (entry as any).responseEnd === 'number'
+              ? (entry as any).responseEnd
+              : 0;
+          if (responseEnd !== 0) {
+            continue;
+          }
+
+          const url = String((entry as any).name ?? '');
+          if (!url || url.startsWith('data:') || url.length > 500) {
+            continue;
+          }
+          const lower = url.toLowerCase();
+          if (blockedPatterns.some((pattern) => lower.includes(pattern))) {
+            continue;
+          }
+
+          const startTime =
+            typeof (entry as any).startTime === 'number'
+              ? (entry as any).startTime
+              : now;
+          const loadingDuration = Math.max(0, now - startTime);
+          if (loadingDuration > 10000) {
+            continue;
+          }
+
+          const resourceType = String(
+            (entry as any).initiatorType ?? ''
+          ).toLowerCase();
+          if (
+            (resourceType === 'img' ||
+              resourceType === 'image' ||
+              resourceType === 'font') &&
+            loadingDuration > 3000
+          ) {
+            continue;
+          }
+
+          pendingRequests.push({
+            url,
+            method: 'GET',
+            loading_duration_ms: Math.round(loadingDuration),
+            resource_type: resourceType || null,
+          });
+
+          if (pendingRequests.length >= 20) {
+            break;
+          }
+        }
+
+        return pendingRequests;
+      });
+
+      return Array.isArray(pending)
+        ? pending.map((entry) => ({
+            url: String((entry as any).url ?? ''),
+            method:
+              typeof (entry as any).method === 'string'
+                ? (entry as any).method
+                : 'GET',
+            loading_duration_ms:
+              typeof (entry as any).loading_duration_ms === 'number'
+                ? (entry as any).loading_duration_ms
+                : 0,
+            resource_type:
+              typeof (entry as any).resource_type === 'string'
+                ? (entry as any).resource_type
+                : null,
+          }))
+        : [];
+    } catch (error) {
+      this.logger.debug(
+        `Failed to gather pending network requests: ${(error as Error).message}`
+      );
+      return [];
+    } finally {
+      await this.validate_page_after_action(page);
+    }
+  }
+
+  get tabs() {
+    return this._tabs.slice();
+  }
+
+  get active_tab_index() {
+    return this.currentTabIndex;
+  }
+
+  get active_tab() {
+    return this._tabs[this.currentTabIndex] ?? null;
+  }
+
+  describe() {
+    return this.toString();
+  }
+
+  get _owns_browser_resources(): boolean {
+    return this.ownsBrowserResources;
+  }
+
+  get is_stopping(): boolean {
+    return this._stoppingPromise !== null;
+  }
+
+  get is_reconnecting(): boolean {
+    return this._reconnecting;
+  }
+
+  get should_gate_watchdog_events(): boolean {
+    return Boolean(
+      this.initialized ||
+      this.browser ||
+      this.browser_context ||
+      this.cdp_url ||
+      this.wss_url ||
+      this._reconnecting
+    );
+  }
+
+  get is_cdp_connected(): boolean {
+    try {
+      if (this.browser) {
+        const browser = this.browser as BrowserEventEmitterLike;
+        if (
+          typeof browser.isConnected === 'function' &&
+          !browser.isConnected()
+        ) {
+          return false;
+        }
+      }
+
+      if (this.browser_context) {
+        const contextBrowser = (this.browser_context as any).browser?.();
+        if (
+          contextBrowser &&
+          typeof contextBrowser.isConnected === 'function' &&
+          !contextBrowser.isConnected()
+        ) {
+          return false;
+        }
+        return true;
+      }
+
+      return Boolean(this.browser);
+    } catch {
+      return false;
+    }
+  }
+
+  async wait_for_reconnect(
+    timeoutSeconds: number = this.RECONNECT_WAIT_TIMEOUT
+  ) {
+    if (!this._reconnecting) {
+      return;
+    }
+
+    const timeoutMs =
+      requireBrowserTimeoutSeconds(timeoutSeconds, 'reconnect timeout') * 1000;
+
+    let timeoutHandle: NodeJS.Timeout | null = null;
+    try {
+      await Promise.race([
+        this._reconnectWaitPromise,
+        new Promise<never>((_, reject) => {
+          timeoutHandle = setTimeout(() => {
+            reject(
+              new Error(
+                `Reconnection wait timed out after ${Math.round(timeoutMs / 1000)}s`
+              )
+            );
+          }, timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+      }
+    }
+  }
+
+  claim_agent(
+    agentId: string,
+    mode: 'exclusive' | 'shared' = 'exclusive'
+  ): boolean {
+    if (!agentId) {
+      return false;
+    }
+
+    if (mode === 'shared') {
+      if (
+        this.attachedAgentId &&
+        this.attachedAgentId !== agentId &&
+        this.attachedSharedAgentIds.size === 0
+      ) {
+        return false;
+      }
+
+      if (this.attachedSharedAgentIds.size === 0 && this.attachedAgentId) {
+        this.attachedSharedAgentIds.add(this.attachedAgentId);
+      }
+      this.attachedSharedAgentIds.add(agentId);
+      this.attachedAgentId = this.attachedAgentId ?? agentId;
+      return true;
+    }
+
+    if (this.attachedSharedAgentIds.size > 0) {
+      if (
+        this.attachedSharedAgentIds.size === 1 &&
+        this.attachedSharedAgentIds.has(agentId)
+      ) {
+        this.attachedSharedAgentIds.clear();
+        this.attachedAgentId = agentId;
+        return true;
+      }
+      return false;
+    }
+
+    if (this.attachedAgentId && this.attachedAgentId !== agentId) {
+      return false;
+    }
+    this.attachedAgentId = agentId;
+    return true;
+  }
+
+  claimAgent(
+    agentId: string,
+    mode: 'exclusive' | 'shared' = 'exclusive'
+  ): boolean {
+    return this.claim_agent(agentId, mode);
+  }
+
+  release_agent(agentId?: string): boolean {
+    if (this.attachedSharedAgentIds.size > 0) {
+      if (!agentId) {
+        this.attachedSharedAgentIds.clear();
+        this.attachedAgentId = null;
+        return true;
+      }
+
+      if (!this.attachedSharedAgentIds.has(agentId)) {
+        return false;
+      }
+
+      this.attachedSharedAgentIds.delete(agentId);
+      if (this.attachedSharedAgentIds.size === 0) {
+        this.attachedAgentId = null;
+      } else if (this.attachedAgentId === agentId) {
+        const [nextOwner] = this.attachedSharedAgentIds;
+        this.attachedAgentId = nextOwner ?? null;
+      }
+      return true;
+    }
+
+    if (!this.attachedAgentId) {
+      return true;
+    }
+    if (agentId && this.attachedAgentId !== agentId) {
+      return false;
+    }
+    this.attachedAgentId = null;
+    return true;
+  }
+
+  releaseAgent(agentId?: string): boolean {
+    return this.release_agent(agentId);
+  }
+
+  get_attached_agent_id(): string | null {
+    return this.attachedAgentId;
+  }
+
+  getAttachedAgentId(): string | null {
+    return this.get_attached_agent_id();
+  }
+
+  get_attached_agent_ids(): string[] {
+    if (this.attachedSharedAgentIds.size > 0) {
+      return Array.from(this.attachedSharedAgentIds);
+    }
+    return this.attachedAgentId ? [this.attachedAgentId] : [];
+  }
+
+  getAttachedAgentIds(): string[] {
+    return this.get_attached_agent_ids();
+  }
+
+  private _determineOwnership() {
+    if (
+      this.cdp_url ||
+      this.wss_url ||
+      this.browser ||
+      this.browser_context ||
+      this.browser_pid
+    ) {
+      return false;
+    }
+    return true;
+  }
+
+  private _createAbortError(reason?: unknown): Error {
+    if (reason instanceof Error) {
+      return reason;
+    }
+    const error = new Error('Operation aborted');
+    error.name = 'AbortError';
+    return error;
+  }
+
+  private _isAbortError(error: unknown): boolean {
+    if (!(error instanceof Error)) {
+      return false;
+    }
+    return (
+      error.name === 'AbortError' ||
+      /abort|aborted|interrupted/i.test(error.message)
+    );
+  }
+
+  private _throwIfAborted(signal: AbortSignal | null = null) {
+    if (signal?.aborted) {
+      throw this._createAbortError(signal.reason);
+    }
+  }
+
+  private async _waitWithAbort(
+    timeoutMs: number,
+    signal: AbortSignal | null = null
+  ) {
+    requireBrowserTimeoutMs(timeoutMs, 'wait timeout');
+    if (timeoutMs <= 0) {
+      this._throwIfAborted(signal);
+      return;
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        cleanup();
+        resolve();
+      }, timeoutMs);
+
+      const onAbort = () => {
+        clearTimeout(timeout);
+        cleanup();
+        reject(this._createAbortError(signal?.reason));
+      };
+
+      const cleanup = () => {
+        signal?.removeEventListener('abort', onAbort);
+      };
+
+      if (signal) {
+        if (signal.aborted) {
+          onAbort();
+          return;
+        }
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
+    });
+  }
+
+  private async _withAbort<T>(
+    promise: Promise<T>,
+    signal: AbortSignal | null = null
+  ): Promise<T> {
+    if (!signal) {
+      return promise;
+    }
+    this._throwIfAborted(signal);
+
+    return await new Promise<T>((resolve, reject) => {
+      const onAbort = () => {
+        cleanup();
+        reject(this._createAbortError(signal.reason));
+      };
+
+      const cleanup = () => {
+        signal.removeEventListener('abort', onAbort);
+      };
+
+      signal.addEventListener('abort', onAbort, { once: true });
+      promise
+        .then((result) => {
+          cleanup();
+          resolve(result);
+        })
+        .catch((error) => {
+          cleanup();
+          reject(error);
+        });
+    });
+  }
+
+  private _toPlaywrightOptions(value: unknown): unknown {
+    if (value === null || value === undefined) {
+      return undefined;
+    }
+    if (Array.isArray(value)) {
+      const converted = value
+        .map((item) => this._toPlaywrightOptions(item))
+        .filter((item) => item !== undefined);
+      return converted;
+    }
+    if (
+      typeof value !== 'object' ||
+      value instanceof Date ||
+      Buffer.isBuffer(value)
+    ) {
+      return value;
+    }
+
+    const result: Record<string, unknown> = {};
+    for (const [rawKey, rawVal] of Object.entries(
+      value as Record<string, unknown>
+    )) {
+      if (
+        rawKey === 'extra_http_headers' &&
+        this._has_url_access_restrictions()
+      ) {
+        continue;
+      }
+      if (rawKey === 'permissions' && this._has_url_access_restrictions()) {
+        continue;
+      }
+      if (
+        DOMAIN_POLICY_UNFILTERABLE_RECORDING_KEYS.has(rawKey) &&
+        this._has_url_access_restrictions()
+      ) {
+        continue;
+      }
+      if (
+        rawKey === 'http_credentials' &&
+        this._has_url_access_restrictions()
+      ) {
+        this._assertHttpCredentialsScoped(rawVal);
+      }
+      if (
+        rawKey === 'client_certificates' &&
+        this._has_url_access_restrictions()
+      ) {
+        this._assertClientCertificatesScoped(rawVal);
+      }
+      const valueToConvert =
+        rawKey === 'storage_state'
+          ? this._prepareStorageStateForContext(rawVal)
+          : rawVal;
+      const convertedValue = this._toPlaywrightOptions(valueToConvert);
+      if (convertedValue === undefined) {
+        continue;
+      }
+      const normalizedKey =
+        PLAYWRIGHT_OPTION_KEY_OVERRIDES[rawKey] ??
+        rawKey.replace(/_([a-z])/g, (_, letter: string) =>
+          letter.toUpperCase()
+        );
+      result[normalizedKey] = convertedValue;
+    }
+    return result;
+  }
+
+  private _assertHttpCredentialsScoped(value: unknown): void {
+    if (!value || typeof value !== 'object') {
+      return;
+    }
+
+    const origin = (value as { origin?: unknown }).origin;
+    if (typeof origin !== 'string' || origin.trim().length === 0) {
+      throw new BrowserError(
+        'http_credentials must include an origin when domain restrictions are configured.'
+      );
+    }
+
+    this._assert_url_allowed(origin.trim());
+  }
+
+  private _assertClientCertificatesScoped(value: unknown): void {
+    if (!Array.isArray(value)) {
+      throw new BrowserError(
+        'client_certificates must be an array when domain restrictions are configured.'
+      );
+    }
+
+    for (const certificate of value) {
+      const origin =
+        certificate && typeof certificate === 'object'
+          ? (certificate as { origin?: unknown }).origin
+          : null;
+      if (typeof origin !== 'string' || origin.trim().length === 0) {
+        throw new BrowserError(
+          'Every client certificate must include an origin when domain restrictions are configured.'
+        );
+      }
+      this._assert_url_allowed(origin.trim());
+    }
+  }
+
+  private _prepareStorageStateForContext(value: unknown): unknown {
+    if (value === null || value === undefined) {
+      return value;
+    }
+
+    let storageState: unknown = value;
+    if (typeof value === 'string') {
+      const resolvedPath = path.resolve(value);
+      try {
+        storageState = readBoundedStorageStateFile(resolvedPath);
+      } catch (error) {
+        throw new BrowserError(
+          `Cannot safely load storage_state from ${resolvedPath}: ${(error as Error).message}`
+        );
+      }
+    }
+
+    if (
+      !storageState ||
+      typeof storageState !== 'object' ||
+      Array.isArray(storageState)
+    ) {
+      throw new BrowserError('storage_state must contain a JSON object.');
+    }
+
+    try {
+      serializeBoundedStorageState(storageState);
+    } catch (error) {
+      throw new BrowserError((error as Error).message);
+    }
+
+    return this._sanitize_storage_state_for_save(storageState);
+  }
+
+  async set_extra_headers(headers: Record<string, string>): Promise<void> {
+    const normalizedHeaders = Object.fromEntries(
+      Object.entries(headers)
+        .map(([key, value]) => [String(key).trim(), String(value)])
+        .filter(([key]) => key.length > 0)
+    );
+
+    if (!this.browser_context) {
+      return;
+    }
+
+    if (this._has_url_access_restrictions()) {
+      await this._installScopedExtraHeaders(normalizedHeaders);
+      return;
+    }
+
+    await this._removeScopedExtraHeadersRoute();
+    if (
+      typeof (this.browser_context as any).setExtraHTTPHeaders === 'function'
+    ) {
+      await (this.browser_context as any).setExtraHTTPHeaders(
+        normalizedHeaders
+      );
+    }
+  }
+
+  private async _removeScopedExtraHeadersRoute(): Promise<void> {
+    const context = this._scopedExtraHeadersRouteContext as
+      | (BrowserContext & {
+          unroute?: (
+            url: string,
+            handler: (route: any) => unknown
+          ) => Promise<void>;
+        })
+      | null;
+    const handler = this._scopedExtraHeadersRouteHandler;
+    this._scopedExtraHeadersRouteContext = null;
+    this._scopedExtraHeadersRouteHandler = null;
+    if (!context || !handler || typeof context.unroute !== 'function') {
+      return;
+    }
+
+    try {
+      await context.unroute('**/*', handler);
+    } catch (error) {
+      this.logger.debug(
+        `Failed to remove scoped extra_http_headers route: ${(error as Error).message}`
+      );
+    }
+  }
+
+  private async _installScopedExtraHeaders(
+    headers: Record<string, string>
+  ): Promise<void> {
+    const context = this.browser_context as
+      | (BrowserContext & {
+          route?: (
+            url: string,
+            handler: (route: any) => unknown
+          ) => Promise<void>;
+          setExtraHTTPHeaders?: (
+            headers: Record<string, string>
+          ) => Promise<void>;
+        })
+      | null;
+    if (!context || typeof context.route !== 'function') {
+      throw new BrowserError(
+        'Cannot safely enforce domain restrictions because BrowserContext.route is unavailable.'
+      );
+    }
+
+    await this._removeScopedExtraHeadersRoute();
+
+    if (typeof context.setExtraHTTPHeaders === 'function') {
+      await context.setExtraHTTPHeaders({});
+    }
+
+    const scopedHeaderNames = new Set(
+      Object.keys(headers).map((name) => name.toLowerCase())
+    );
+    const routeHandler = async (route: any) => {
+      const continueRoute = async (overrides?: {
+        headers?: Record<string, string>;
+      }) => {
+        if (typeof route?.fallback === 'function') {
+          return await route.fallback(overrides);
+        }
+        if (typeof route?.continue === 'function') {
+          return await route.continue(overrides);
+        }
+        throw new BrowserError(
+          'Cannot continue routed request while enforcing domain restrictions.'
+        );
+      };
+
+      const request =
+        typeof route?.request === 'function' ? route.request() : null;
+      const url =
+        typeof request?.url === 'function'
+          ? String(request.url())
+          : typeof request?.url === 'string'
+            ? request.url
+            : '';
+      const requestHeaders =
+        typeof request?.headers === 'function' ? request.headers() : null;
+
+      let denialReason: string | null = 'invalid_url';
+      if (url) {
+        try {
+          denialReason = this._get_url_access_denial_reason(url);
+        } catch {
+          denialReason = 'blocked';
+        }
+      }
+
+      if (denialReason) {
+        const isNavigationRequest =
+          (typeof request?.isNavigationRequest === 'function' &&
+            request.isNavigationRequest()) ||
+          (typeof request?.resourceType === 'function' &&
+            request.resourceType() === 'document');
+        if (isNavigationRequest) {
+          if (typeof route?.abort !== 'function') {
+            throw new BrowserError(
+              'Cannot block a disallowed navigation because Route.abort is unavailable.'
+            );
+          }
+          await route.abort('blockedbyclient');
+          return;
+        }
+        if (scopedHeaderNames.size === 0) {
+          await continueRoute();
+          return;
+        }
+        if (!requestHeaders || typeof requestHeaders !== 'object') {
+          if (typeof route?.abort === 'function') {
+            await route.abort('blockedbyclient');
+            return;
+          }
+          throw new BrowserError(
+            'Cannot safely strip scoped headers from a disallowed request.'
+          );
+        }
+        const strippedHeaders = Object.fromEntries(
+          Object.entries(requestHeaders as Record<string, string>).filter(
+            ([name]) => !scopedHeaderNames.has(name.toLowerCase())
+          )
+        );
+        await continueRoute({ headers: strippedHeaders });
+        return;
+      }
+
+      await continueRoute({
+        headers: {
+          ...(requestHeaders ?? {}),
+          ...headers,
+        },
+      });
+    };
+
+    await context.route('**/*', routeHandler);
+    this._scopedExtraHeadersRouteContext = context;
+    this._scopedExtraHeadersRouteHandler = routeHandler;
+  }
+
+  private async _applyConfiguredExtraHttpHeaders(): Promise<void> {
+    const configuredHeaders =
+      this.browser_profile.config.extra_http_headers ?? {};
+    if (this._has_url_access_restrictions()) {
+      await this._installScopedExtraHeaders(configuredHeaders);
+      return;
+    }
+
+    if (Object.keys(configuredHeaders).length > 0) {
+      await this.set_extra_headers(configuredHeaders);
+    }
+  }
+
+  private _usesRemoteBrowserConnection() {
+    return Boolean(this.cdp_url || this.wss_url);
+  }
+
+  private async _connectToConfiguredBrowser(playwright: any) {
+    const connectOptions = this._toPlaywrightOptions(
+      this.browser_profile.kwargs_for_connect()
+    ) as Record<string, unknown> | undefined;
+
+    if (this.cdp_url) {
+      return await playwright.chromium.connectOverCDP(
+        this.cdp_url,
+        connectOptions ?? {}
+      );
+    }
+
+    if (this.wss_url) {
+      return await playwright.chromium.connect(
+        this.wss_url,
+        connectOptions ?? {}
+      );
+    }
+
+    throw new Error(
+      'Cannot connect to a remote browser without cdp_url or wss_url'
+    );
+  }
+
+  private async _ensureBrowserContextFromBrowser(browser: Browser | null) {
+    const existingContexts =
+      (typeof browser?.contexts === 'function' ? browser.contexts() : []) ?? [];
+    if (existingContexts.length > 0) {
+      return existingContexts[0] ?? null;
+    }
+    if (typeof browser?.newContext === 'function') {
+      const contextOptions = this._toPlaywrightOptions(
+        this.browser_profile.kwargs_for_new_context()
+      );
+      return await browser.newContext(
+        (contextOptions as Record<string, unknown>) ?? {}
+      );
+    }
+    return null;
+  }
+
+  private _beginReconnectWait() {
+    this._reconnectWaitPromise = new Promise<void>((resolve) => {
+      this._resolveReconnectWait = resolve;
+    });
+  }
+
+  private _endReconnectWait() {
+    this._resolveReconnectWait?.();
+    this._resolveReconnectWait = null;
+    this._reconnectWaitPromise = Promise.resolve();
+  }
+
+  private _detachRemoteDisconnectHandler() {
+    if (!this._disconnectAwareBrowser || !this._browserDisconnectHandler) {
+      this._disconnectAwareBrowser = null;
+      this._browserDisconnectHandler = null;
+      return;
+    }
+
+    if (typeof this._disconnectAwareBrowser.off === 'function') {
+      this._disconnectAwareBrowser.off(
+        'disconnected',
+        this._browserDisconnectHandler
+      );
+    } else if (
+      typeof this._disconnectAwareBrowser.removeListener === 'function'
+    ) {
+      this._disconnectAwareBrowser.removeListener(
+        'disconnected',
+        this._browserDisconnectHandler
+      );
+    }
+
+    this._disconnectAwareBrowser = null;
+    this._browserDisconnectHandler = null;
+  }
+
+  private _attachRemoteDisconnectHandler(browser: Browser | null) {
+    this._detachRemoteDisconnectHandler();
+
+    if (!this._usesRemoteBrowserConnection()) {
+      return;
+    }
+
+    const browserWithEvents = browser as BrowserEventEmitterLike | null;
+    if (!browserWithEvents || typeof browserWithEvents.on !== 'function') {
+      return;
+    }
+
+    const onDisconnected = () => {
+      this._handleUnexpectedRemoteDisconnect();
+    };
+
+    browserWithEvents.on('disconnected', onDisconnected);
+    this._disconnectAwareBrowser = browserWithEvents;
+    this._browserDisconnectHandler = onDisconnected;
+  }
+
+  private _handleUnexpectedRemoteDisconnect() {
+    if (
+      this._intentionalStop ||
+      this._reconnecting ||
+      !this._usesRemoteBrowserConnection()
+    ) {
+      return;
+    }
+
+    this.logger.warning(
+      'Remote browser connection closed unexpectedly; attempting to reconnect'
+    );
+    this._recordRecentEvent('browser_disconnected', {
+      url: this.currentUrl,
+    });
+
+    const reconnectTask = this._auto_reconnect();
+    this._reconnectTask = reconnectTask;
+    void reconnectTask
+      .catch((error) => {
+        this.logger.warning(
+          `Automatic reconnect failed: ${error instanceof Error ? error.message : String(error)}`
+        );
+      })
+      .finally(() => {
+        if (this._reconnectTask === reconnectTask) {
+          this._reconnectTask = null;
+        }
+      });
+  }
+
+  private async _restorePagesAfterReconnect(
+    preferredUrl: string | null,
+    preferredTabIndex: number
+  ) {
+    if (!this.browser_context) {
+      this._assignAgentCurrentPage(null);
+      this.human_current_page = null;
+      return;
+    }
+
+    let pages = this.browser_context.pages?.() ?? [];
+    if (!pages.length && typeof this.browser_context.newPage === 'function') {
+      const createdPage = await this.browser_context.newPage();
+      if (createdPage) {
+        pages = this.browser_context.pages?.() ?? [createdPage];
+      }
+    }
+
+    this.tabPages = new Map();
+    this._assignAgentCurrentPage(null);
+    this.human_current_page = null;
+    this._syncTabsWithBrowserPages();
+
+    if (!pages.length) {
+      this.currentTabIndex = 0;
+      this.currentUrl = normalize_url(preferredUrl ?? 'about:blank');
+      this.currentTitle = boundBrowserStateTitle(this.currentUrl);
+      if (!this._tabs.length) {
+        this._tabs = [
+          this._createTabInfo({
+            page_id: this._tabCounter++,
+            url: this.currentUrl,
+            title: this.currentTitle,
+          }),
+        ];
+      }
+      this._syncSessionManagerFromTabs();
+      return;
+    }
+
+    const normalizedPreferredUrl =
+      typeof preferredUrl === 'string' && preferredUrl.trim().length > 0
+        ? normalize_url(preferredUrl)
+        : null;
+    const pageByUrl =
+      normalizedPreferredUrl == null
+        ? null
+        : (pages.find((page) => {
+            try {
+              return normalize_url(page.url()) === normalizedPreferredUrl;
+            } catch {
+              return false;
+            }
+          }) ?? null);
+    const clampedIndex =
+      preferredTabIndex >= 0 && preferredTabIndex < pages.length
+        ? preferredTabIndex
+        : 0;
+    const nextPage = pageByUrl ?? pages[clampedIndex] ?? pages[0] ?? null;
+    const nextTabIndex = nextPage
+      ? this._tabs.findIndex(
+          (tab) => this.tabPages.get(tab.page_id) === nextPage
+        )
+      : -1;
+
+    if (nextTabIndex >= 0) {
+      this.currentTabIndex = nextTabIndex;
+    }
+
+    this._setActivePage(nextPage);
+    this.human_current_page = nextPage;
+    if (nextPage) {
+      await this._assert_page_url_allowed_or_rollback(nextPage);
+    }
+    await this._syncCurrentTabFromPage(nextPage);
+  }
+
+  async reconnect(
+    options: {
+      preferred_url?: string | null;
+      preferred_tab_index?: number;
+    } = {}
+  ): Promise<void> {
+    if (!this._usesRemoteBrowserConnection()) {
+      throw new Error('Cannot reconnect without a remote browser connection');
+    }
+
+    const preferredUrl =
+      typeof options.preferred_url === 'string'
+        ? options.preferred_url
+        : this.currentUrl;
+    const preferredTabIndex =
+      typeof options.preferred_tab_index === 'number'
+        ? options.preferred_tab_index
+        : this.currentTabIndex;
+
+    this._detachRemoteDisconnectHandler();
+    this.cachedBrowserState = null;
+    this.currentPageLoadingStatus = null;
+    this.pageLoadingStatuses = new WeakMap<Page, PageLoadingStatuses>();
+    this.browser = null;
+    this.browser_context = null;
+    this._assignAgentCurrentPage(null);
+    this.human_current_page = null;
+    this._dialogHandlersAttached = new WeakSet<Page>();
+    this.session_manager.clear();
+
+    const playwright = (this.playwright as any) ?? (await async_playwright());
+    this.playwright = playwright;
+    this.browser = await this._connectToConfiguredBrowser(playwright);
+    this.ownsBrowserResources = false;
+    this.browser_context = await this._ensureBrowserContextFromBrowser(
+      this.browser
+    );
+
+    await this._applyConfiguredExtraHttpHeaders();
+    await this._restorePagesAfterReconnect(preferredUrl, preferredTabIndex);
+    this._attachRemoteDisconnectHandler(this.browser);
+    this.initialized = true;
+    this._recordRecentEvent('browser_reconnected', {
+      url: this.currentUrl,
+    });
+  }
+
+  private async _auto_reconnect(maxAttempts: number = 3) {
+    if (this._reconnecting || !this._usesRemoteBrowserConnection()) {
+      return;
+    }
+
+    this._reconnecting = true;
+    this._beginReconnectWait();
+    const startTime = Date.now();
+    const preferredUrl = this.currentUrl;
+    const preferredTabIndex = this.currentTabIndex;
+
+    try {
+      await this.event_bus.dispatch(
+        new BrowserStoppedEvent({
+          reason: 'connection_lost',
+        })
+      );
+
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        if (this._intentionalStop) {
+          return;
+        }
+
+        await this.event_bus.dispatch(
+          new BrowserReconnectingEvent({
+            cdp_url: this.cdp_url ?? this.wss_url ?? 'remote',
+            attempt,
+            max_attempts: maxAttempts,
+          })
+        );
+
+        try {
+          await Promise.race([
+            this.reconnect({
+              preferred_url: preferredUrl,
+              preferred_tab_index: preferredTabIndex,
+            }),
+            new Promise<never>((_, reject) => {
+              setTimeout(() => {
+                reject(
+                  new Error(
+                    `Reconnect attempt timed out after ${Math.round(
+                      REMOTE_RECONNECT_ATTEMPT_TIMEOUT_MS / 1000
+                    )}s`
+                  )
+                );
+              }, REMOTE_RECONNECT_ATTEMPT_TIMEOUT_MS);
+            }),
+          ]);
+
+          if (this._intentionalStop) {
+            return;
+          }
+
+          await this.event_bus.dispatch(
+            new BrowserConnectedEvent({
+              cdp_url: this.cdp_url ?? this.wss_url ?? 'remote',
+            })
+          );
+          await this.event_bus.dispatch(
+            new BrowserReconnectedEvent({
+              cdp_url: this.cdp_url ?? this.wss_url ?? 'remote',
+              attempt,
+              downtime_seconds: (Date.now() - startTime) / 1000,
+            })
+          );
+          return;
+        } catch (error) {
+          this.logger.warning(
+            `Reconnect attempt ${attempt}/${maxAttempts} failed: ${(error as Error).message}`
+          );
+          if (attempt >= maxAttempts) {
+            break;
+          }
+
+          const delayMs =
+            REMOTE_RECONNECT_DELAYS_MS[attempt - 1] ??
+            REMOTE_RECONNECT_DELAYS_MS[REMOTE_RECONNECT_DELAYS_MS.length - 1];
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
+      }
+
+      await this.event_bus.dispatch(
+        new BrowserErrorEvent({
+          error_type: 'ReconnectionFailed',
+          message: `Failed to reconnect after ${maxAttempts} attempts (${((Date.now() - startTime) / 1000).toFixed(1)}s)`,
+          details: {
+            cdp_url: this.cdp_url ?? this.wss_url ?? 'remote',
+            max_attempts: maxAttempts,
+          },
+        })
+      );
+    } finally {
+      this._reconnecting = false;
+      this._endReconnectWait();
+    }
+  }
+
+  private _isSandboxLaunchError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    return (
+      /no usable sandbox/i.test(message) ||
+      /chromium sandboxing failed/i.test(message) ||
+      /zygote_host_impl_linux\.cc/i.test(message)
+    );
+  }
+
+  private _createNoSandboxLaunchOptions(
+    launchOptions: Record<string, unknown>
+  ): Record<string, unknown> {
+    const rawArgs = Array.isArray(launchOptions.args)
+      ? launchOptions.args.filter(
+          (arg): arg is string => typeof arg === 'string'
+        )
+      : [];
+    const mergedArgs = [...rawArgs];
+    for (const arg of CHROME_DOCKER_ARGS) {
+      if (!mergedArgs.includes(arg)) {
+        mergedArgs.push(arg);
+      }
+    }
+
+    return {
+      ...launchOptions,
+      chromiumSandbox: false,
+      args: mergedArgs,
+    };
+  }
+
+  private async _launchChromiumWithSandboxFallback(
+    playwright: any,
+    launchOptions: Record<string, unknown>
+  ): Promise<Browser> {
+    try {
+      return await playwright.chromium.launch(launchOptions);
+    } catch (error) {
+      const sandboxEnabled = this.browser_profile.config.chromium_sandbox;
+      if (!sandboxEnabled || !this._isSandboxLaunchError(error)) {
+        throw error;
+      }
+
+      this.logger.warning(
+        'Chromium sandbox is unavailable in this environment. Retrying launch with chromium_sandbox=false (--no-sandbox).'
+      );
+      const fallbackOptions = this._createNoSandboxLaunchOptions(launchOptions);
+      return await playwright.chromium.launch(fallbackOptions);
+    }
+  }
+
+  private _connectionDescriptor() {
+    const remoteEndpoint = this.cdp_url || this.wss_url;
+    if (remoteEndpoint) {
+      try {
+        const parsed = new URL(remoteEndpoint);
+        return `${this.id.slice(-4)}:${parsed.port || 'remote'}`;
+      } catch {
+        return `${this.id.slice(-4)}:remote`;
+      }
+    }
+
+    return `${this.id.slice(-4)}:${this.browser_pid ?? 'playwright'}`;
+  }
+
+  toString() {
+    const ownershipFlag = this.ownsBrowserResources ? '#' : '©';
+    return `BrowserSession🆂 ${this._connectionDescriptor()} ${ownershipFlag}${String(this.id).slice(-2)}`;
+  }
+
+  get logger() {
+    if (!this._logger) {
+      this._logger = createLogger(
+        `browser_use.browser.session.${this.id.slice(-4)}`
+      );
+    }
+    return this._logger;
+  }
+
+  async start() {
+    this.attach_default_watchdogs();
+    this._intentionalStop = false;
+
+    if (this.initialized) {
+      return this;
+    }
+
+    await this.event_bus.dispatch(
+      new BrowserStartEvent({
+        cdp_url: this.cdp_url,
+      })
+    );
+
+    const ensurePage = async () => {
+      const current = this.agent_current_page;
+      if (current && !(current as any).isClosed?.()) {
+        this._setActivePage(current);
+        return;
+      }
+
+      const existingPages =
+        (typeof this.browser_context?.pages === 'function'
+          ? this.browser_context.pages()
+          : []) ?? [];
+      const firstOpenPage =
+        existingPages.find((page) => !(page as any).isClosed?.()) ?? null;
+
+      if (firstOpenPage) {
+        this._setActivePage(firstOpenPage);
+        return;
+      }
+
+      if (typeof this.browser_context?.newPage === 'function') {
+        const created = await this.browser_context.newPage();
+        this._setActivePage(created ?? null);
+        return;
+      }
+
+      this._setActivePage(null);
+    };
+
+    if (!this.browser_context) {
+      if (!this.browser) {
+        const playwright =
+          (this.playwright as any) ?? (await async_playwright());
+        this.playwright = playwright;
+
+        if (this.cdp_url) {
+          this.browser = await this._connectToConfiguredBrowser(playwright);
+          this.ownsBrowserResources = false;
+        } else if (this.wss_url) {
+          this.browser = await this._connectToConfiguredBrowser(playwright);
+          this.ownsBrowserResources = false;
+        } else {
+          const launchOptions = this._toPlaywrightOptions(
+            await this.browser_profile.kwargs_for_launch()
+          ) as Record<string, unknown> | undefined;
+          const browserLaunchToken = randomUUID();
+          const rawLaunchArgs = Array.isArray(launchOptions?.args)
+            ? launchOptions.args.filter(
+                (arg): arg is string => typeof arg === 'string'
+              )
+            : [];
+          this._browserLaunchToken = browserLaunchToken;
+          try {
+            this.browser = await this._launchChromiumWithSandboxFallback(
+              playwright,
+              {
+                ...(launchOptions ?? {}),
+                args: [
+                  ...rawLaunchArgs,
+                  `--browser-use-session-token=${browserLaunchToken}`,
+                ],
+              }
+            );
+          } catch (error) {
+            this._browserLaunchToken = null;
+            throw error;
+          }
+          this.ownsBrowserResources = true;
+
+          const processGetter = (this.browser as any)?.process;
+          if (typeof processGetter === 'function') {
+            const processRef = processGetter.call(this.browser) as
+              | { pid?: number }
+              | undefined;
+            if (typeof processRef?.pid === 'number') {
+              this.browser_pid = processRef.pid;
+            }
+          }
+        }
+      }
+
+      const existingContexts =
+        (typeof this.browser?.contexts === 'function'
+          ? this.browser.contexts()
+          : []) ?? [];
+      if (existingContexts.length > 0) {
+        this.browser_context = existingContexts[0] ?? null;
+      } else {
+        this.browser_context = await this._ensureBrowserContextFromBrowser(
+          this.browser
+        );
+      }
+    }
+
+    await this._applyConfiguredExtraHttpHeaders();
+    await ensurePage();
+    if (
+      !this.human_current_page ||
+      (this.human_current_page as any).isClosed?.()
+    ) {
+      this.human_current_page = this.agent_current_page;
+    }
+
+    const activePage = await this.get_current_page();
+    if (activePage) {
+      await this._assert_page_url_allowed_or_rollback(activePage);
+      await this._syncCurrentTabFromPage(activePage);
+      try {
+        this.currentUrl = normalize_url(activePage.url());
+      } catch {
+        // Ignore url read errors from transient pages.
+      }
+      if (typeof activePage.title === 'function') {
+        try {
+          this.currentTitle = await readBoundedPageTitle(activePage);
+        } catch {
+          // Ignore title read errors from transient pages.
+        }
+      }
+    }
+
+    this.initialized = true;
+    this._recordRecentEvent('browser_started', { url: this.currentUrl });
+    this.logger.debug(
+      `Started ${this.describe()} with profile ${this.browser_profile.toString()}`
+    );
+    this._attachRemoteDisconnectHandler(this.browser);
+    await this.event_bus.dispatch(
+      new BrowserConnectedEvent({
+        cdp_url: this.cdp_url ?? this.wss_url ?? 'playwright',
+      })
+    );
+    return this;
+  }
+
+  /**
+   * Setup browser session by connecting to an existing browser process via PID
+   * Useful for debugging or connecting to manually launched browsers
+   * @param browserPid - Process ID of the browser to connect to
+   * @param cdpUrl - Optional CDP URL (will be discovered if not provided)
+   */
+  async setupBrowserViaBrowserPid(
+    browserPid: number,
+    cdpUrl?: string
+  ): Promise<void> {
+    this.logger.info(`Connecting to existing browser with PID ${browserPid}`);
+
+    this.browser_pid = browserPid;
+
+    // If CDP URL not provided, try to discover it
+    if (!cdpUrl) {
+      cdpUrl = (await this._discoverCdpUrl(browserPid)) ?? undefined;
+    }
+
+    if (!cdpUrl) {
+      throw new Error(
+        `Could not discover CDP URL for browser PID ${browserPid}`
+      );
+    }
+
+    this.cdp_url = cdpUrl;
+    this.logger.info(
+      `Discovered CDP URL: ${BrowserSession._redact_url_for_logging(cdpUrl)}`
+    );
+
+    // Connect to browser via CDP
+    try {
+      const playwright = await import('playwright');
+      const browser = await this._connectToConfiguredBrowser(playwright);
+
+      this.browser = browser as any;
+      this.playwright = playwright;
+
+      // Get or create context
+      const contexts = browser.contexts();
+      if (contexts.length > 0) {
+        this.browser_context = contexts[0] as any;
+      } else {
+        this.browser_context = (await browser.newContext()) as any;
+      }
+
+      await this._applyConfiguredExtraHttpHeaders();
+
+      // Get or create page
+      if (!this.browser_context) {
+        throw new Error('Browser context not available');
+      }
+      const pages = this.browser_context.pages();
+      if (pages.length > 0) {
+        this._assignAgentCurrentPage(pages[0] as any);
+        this.human_current_page = pages[0] as any;
+      } else {
+        const page = await this.browser_context.newPage();
+        this._assignAgentCurrentPage(page as any);
+        this.human_current_page = page as any;
+      }
+
+      // We don't own this browser since we're connecting to existing one
+      this.ownsBrowserResources = false;
+      this._attachRemoteDisconnectHandler(this.browser);
+
+      this.initialized = true;
+      this.logger.info(`Successfully connected to browser PID ${browserPid}`);
+    } catch (error) {
+      throw new Error(
+        `Failed to connect to browser PID ${browserPid}: ${(error as Error).message}`,
+        { cause: error }
+      );
+    }
+  }
+
+  /**
+   * Discover CDP URL from browser PID
+   * Probes only the debugging endpoint declared by that process.
+   */
+  private async _discoverCdpUrl(browserPid: number): Promise<string | null> {
+    const initialArguments = this._getProcessArguments(browserPid);
+    if (!initialArguments) {
+      this.logger.warning(
+        `Could not inspect command arguments for browser PID ${browserPid}`
+      );
+      return null;
+    }
+
+    const rawPort = this._getProcessArgument(
+      initialArguments,
+      '--remote-debugging-port'
+    );
+    if (!rawPort || !/^\d+$/.test(rawPort)) {
+      this.logger.warning(
+        `Browser PID ${browserPid} does not declare a remote debugging port`
+      );
+      return null;
+    }
+
+    const declaredPort = Number(rawPort);
+    let target: DevToolsActivePort | null = null;
+    if (declaredPort === 0) {
+      const userDataDir = this._getProcessArgument(
+        initialArguments,
+        '--user-data-dir'
+      );
+      if (userDataDir && path.isAbsolute(userDataDir)) {
+        target = this._readDevToolsActivePort(
+          path.join(userDataDir, 'DevToolsActivePort')
+        );
+      }
+    } else if (
+      Number.isSafeInteger(declaredPort) &&
+      declaredPort > 0 &&
+      declaredPort <= 65_535
+    ) {
+      target = { port: declaredPort, browserPath: '' };
+    }
+
+    if (!target) {
+      this.logger.warning(
+        `Could not resolve the debugging endpoint for browser PID ${browserPid}`
+      );
+      return null;
+    }
+
+    const webSocketDebuggerUrl = await this._probeLocalCdpWebSocketUrl(
+      target.port
+    );
+    if (!webSocketDebuggerUrl) {
+      this.logger.warning(
+        `Could not discover CDP URL for PID ${browserPid} on declared port ${target.port}`
+      );
+      return null;
+    }
+    if (
+      target.browserPath &&
+      new URL(webSocketDebuggerUrl).pathname !== target.browserPath
+    ) {
+      this.logger.warning(
+        `CDP browser path did not match browser PID ${browserPid}`
+      );
+      return null;
+    }
+
+    const currentArguments = this._getProcessArguments(browserPid);
+    if (
+      !currentArguments ||
+      currentArguments.length !== initialArguments.length ||
+      currentArguments.some(
+        (argument, index) => argument !== initialArguments[index]
+      )
+    ) {
+      this.logger.warning(
+        `Browser PID ${browserPid} changed while discovering its CDP endpoint`
+      );
+      return null;
+    }
+
+    this.logger.debug(`Found CDP endpoint on port ${target.port}`);
+    return webSocketDebuggerUrl;
+  }
+
+  private _getProcessArgument(args: string[], name: string): string | null {
+    let value: string | null = null;
+    for (let index = 0; index < args.length; index += 1) {
+      const argument = args[index];
+      if (argument === name) {
+        value = args[index + 1] ?? null;
+      }
+      if (argument?.startsWith(`${name}=`)) {
+        value = argument.slice(name.length + 1);
+      }
+    }
+    return value;
+  }
+
+  private _getProcessArguments(pid: number): string[] | null {
+    return getProcessArguments(pid);
+  }
+
+  private _readDevToolsActivePort(filePath: string) {
+    return readDevToolsActivePort(filePath);
+  }
+
+  private _probeLocalCdpWebSocketUrl(port: number) {
+    return discoverLocalCdpWebSocketUrl({ host: 'localhost', port });
+  }
+
+  private async _shutdown_browser_session() {
+    this.initialized = false;
+    this._intentionalStop = true;
+    this._reconnecting = false;
+    this._endReconnectWait();
+    this._reconnectTask = null;
+    this._detachRemoteDisconnectHandler();
+    this.attachedAgentId = null;
+    this.attachedSharedAgentIds.clear();
+
+    const closeWithTimeout = async (
+      label: string,
+      operation: Promise<unknown>,
+      timeoutMs = 3000
+    ) => {
+      let timeoutHandle: NodeJS.Timeout | null = null;
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timeoutHandle = setTimeout(
+          () => reject(new Error(`${label} timed out after ${timeoutMs}ms`)),
+          timeoutMs
+        );
+      });
+
+      try {
+        await Promise.race([operation, timeoutPromise]);
+      } finally {
+        if (timeoutHandle) {
+          clearTimeout(timeoutHandle);
+        }
+      }
+    };
+
+    if (this.ownsBrowserResources) {
+      if (typeof this.browser_context?.close === 'function') {
+        try {
+          await closeWithTimeout(
+            'Closing browser context',
+            this.browser_context.close()
+          );
+        } catch (error) {
+          this.logger.debug(
+            `Failed to close browser context: ${(error as Error).message}`
+          );
+        }
+      }
+
+      if (typeof this.browser?.close === 'function') {
+        try {
+          await closeWithTimeout(
+            'Closing browser instance',
+            this.browser.close()
+          );
+        } catch (error) {
+          this.logger.debug(
+            `Failed to close browser instance: ${(error as Error).message}`
+          );
+        }
+      }
+    }
+
+    // Kill child processes first
+    await this._killChildProcesses();
+
+    // If we own the browser resources, terminate the browser process
+    if (this.ownsBrowserResources && this.browser_pid) {
+      await this._terminateBrowserProcess();
+    }
+
+    this.browser = null;
+    this.browser_context = null;
+    this._assignAgentCurrentPage(null);
+    this.human_current_page = null;
+    this.browser_pid = null;
+    this._browserLaunchToken = null;
+    this.cdp_url = null;
+    this.wss_url = null;
+    this.playwright = null;
+    this.cachedBrowserState = null;
+    this._tabs = [];
+    this.session_manager.clear();
+    this.downloaded_files = [];
+    this._closedPopupMessages = [];
+    this._dialogHandlersAttached = new WeakSet<Page>();
+    this._recentEvents = [];
+  }
+
+  async close() {
+    await this.stop();
+  }
+
+  async get_browser_state_with_recovery(options: BrowserStateOptions = {}) {
+    const signal = options.signal ?? null;
+    const includeRecentEvents = options.include_recent_events ?? false;
+    this._throwIfAborted(signal);
+
+    if (!this.initialized) {
+      await this._withAbort(this.start(), signal);
+    }
+    const page = await this._withAbort(this.get_current_page(), signal);
+    this._throwIfAborted(signal);
+    this.cachedBrowserState = null;
+    let domState: DOMState;
+
+    if (!page) {
+      domState = createEmptyDomState();
+    } else {
+      await this.validate_page_after_action(page, signal);
+      try {
+        const domService = new DomService(page, this.logger);
+        domState = await this._withAbort(
+          domService.get_clickable_elements(
+            this.browser_profile.highlight_elements,
+            -1,
+            this.browser_profile.viewport_expansion
+          ),
+          signal
+        );
+      } catch (error) {
+        if (this._isAbortError(error)) {
+          throw error;
+        }
+        this.logger.debug(
+          `Failed to build DOM tree: ${(error as Error).message}`
+        );
+        domState = createEmptyDomState();
+      }
+
+      const liveUrl =
+        typeof page.url === 'function'
+          ? normalize_url(page.url())
+          : this.currentUrl;
+      const shouldRetryEmptyDom =
+        Object.keys(domState.selector_map).length === 0 &&
+        !this._is_new_tab_page(liveUrl) &&
+        !liveUrl.toLowerCase().endsWith('.pdf');
+
+      if (shouldRetryEmptyDom) {
+        this.logger.debug(
+          `Empty DOM detected for ${BrowserSession._redact_url_for_logging(
+            liveUrl
+          )}; retrying once`
+        );
+        await this._waitWithAbort(EMPTY_DOM_RETRY_DELAY_MS, signal);
+
+        try {
+          const retryDomService = new DomService(page, this.logger);
+          const retriedDomState = await this._withAbort(
+            retryDomService.get_clickable_elements(
+              this.browser_profile.highlight_elements,
+              -1,
+              this.browser_profile.viewport_expansion
+            ),
+            signal
+          );
+          if (Object.keys(retriedDomState.selector_map).length > 0) {
+            domState = retriedDomState;
+          }
+        } catch (error) {
+          if (this._isAbortError(error)) {
+            throw error;
+          }
+          this.logger.debug(
+            `Retry after empty DOM failed: ${(error as Error).message}`
+          );
+        }
+      }
+
+      await this.validate_page_after_action(page, signal);
+    }
+
+    let screenshot: string | null = null;
+    if (options.include_screenshot && page?.screenshot) {
+      try {
+        const image = await this._withAbort(
+          page.screenshot({
+            type: 'png',
+            fullPage: false,
+          }),
+          signal
+        );
+        screenshot =
+          typeof image === 'string'
+            ? image
+            : Buffer.from(image).toString('base64');
+      } catch (error) {
+        if (this._isAbortError(error)) {
+          throw error;
+        }
+        this.logger.debug(
+          `Failed to capture screenshot: ${(error as Error).message}`
+        );
+      }
+      await this.validate_page_after_action(page, signal);
+    }
+
+    let pageInfo = null;
+    let pixelsAbove = 0;
+    let pixelsBelow = 0;
+    if (page) {
+      try {
+        const metrics = await this._withAbort(
+          page.evaluate(() => {
+            const doc = document.documentElement;
+            const body = document.body;
+            const width = Math.max(
+              doc?.scrollWidth ?? 0,
+              body?.scrollWidth ?? 0,
+              doc?.clientWidth ?? 0
+            );
+            const height = Math.max(
+              doc?.scrollHeight ?? 0,
+              body?.scrollHeight ?? 0,
+              doc?.clientHeight ?? 0
+            );
+            return {
+              viewportWidth: window.innerWidth,
+              viewportHeight: window.innerHeight,
+              scrollX: window.scrollX,
+              scrollY: window.scrollY,
+              pageWidth: width,
+              pageHeight: height,
+            };
+          }),
+          signal
+        );
+        pixelsAbove = Math.max(metrics.scrollY ?? 0, 0);
+        const viewportHeight = metrics.viewportHeight ?? 0;
+        const viewportWidth = metrics.viewportWidth ?? 0;
+        pixelsBelow = Math.max(
+          (metrics.pageHeight ?? 0) - (metrics.scrollY + viewportHeight),
+          0
+        );
+        const pixelsLeft = Math.max(metrics.scrollX ?? 0, 0);
+        const pixelsRight = Math.max(
+          (metrics.pageWidth ?? 0) - (metrics.scrollX + viewportWidth),
+          0
+        );
+        pageInfo = {
+          viewport_width: viewportWidth,
+          viewport_height: viewportHeight,
+          page_width: metrics.pageWidth ?? viewportWidth,
+          page_height: metrics.pageHeight ?? viewportHeight,
+          scroll_x: metrics.scrollX ?? 0,
+          scroll_y: metrics.scrollY ?? 0,
+          pixels_above: pixelsAbove,
+          pixels_below: pixelsBelow,
+          pixels_left: pixelsLeft,
+          pixels_right: pixelsRight,
+        };
+      } catch (error) {
+        if (this._isAbortError(error)) {
+          throw error;
+        }
+        this.logger.debug(
+          `Failed to compute page metrics: ${(error as Error).message}`
+        );
+      }
+      await this.validate_page_after_action(page, signal);
+    }
+
+    const pendingNetworkRequests = await this._getPendingNetworkRequests(page);
+    if (page) {
+      await this.validate_page_after_action(page, signal);
+    }
+    if (
+      pageInfo &&
+      Number.isFinite(pageInfo.viewport_width) &&
+      Number.isFinite(pageInfo.viewport_height)
+    ) {
+      this._original_viewport_size = [
+        Math.floor(pageInfo.viewport_width),
+        Math.floor(pageInfo.viewport_height),
+      ];
+    }
+    const paginationButtons = DomService.detect_pagination_buttons(
+      domState.selector_map
+    );
+    const summary = new BrowserStateSummary(domState, {
+      url: this.currentUrl,
+      title: this.currentTitle || this.currentUrl,
+      tabs: this._buildTabs(),
+      screenshot,
+      page_info: pageInfo,
+      pixels_above: pixelsAbove,
+      pixels_below: pixelsBelow,
+      browser_errors: this.currentPageLoadingStatus
+        ? [this.currentPageLoadingStatus]
+        : [],
+      is_pdf_viewer: Boolean(this.currentUrl?.toLowerCase().endsWith('.pdf')),
+      loading_status: this.currentPageLoadingStatus,
+      recent_events: includeRecentEvents
+        ? this._getRecentEventsSummary()
+        : null,
+      pending_network_requests: pendingNetworkRequests,
+      pagination_buttons: paginationButtons,
+      closed_popup_messages: this._getClosedPopupMessagesSnapshot(),
+    });
+
+    // Implement clickable element hash caching to detect new elements
+    if (options.cache_clickable_elements_hashes && page) {
+      await this.validate_page_after_action(page, signal);
+      const currentUrl = page.url();
+      const currentHashes = this._computeElementHashes(domState.selector_map);
+
+      // Mark new elements if we have cached hashes for this URL
+      if (
+        this._cachedClickableElementHashes &&
+        this._cachedClickableElementHashes.url === currentUrl
+      ) {
+        this._markNewElements(
+          domState.selector_map,
+          this._cachedClickableElementHashes.hashes
+        );
+      }
+
+      // Update cache with current hashes
+      this._cachedClickableElementHashes = {
+        url: currentUrl,
+        hashes: currentHashes,
+      };
+    }
+
+    this._throwIfAborted(signal);
+    if (page) {
+      await this.validate_page_after_action(page, signal);
+    }
+    this.cachedBrowserState = summary;
+    return summary;
+  }
+
+  async get_current_page() {
+    this._syncTabsWithBrowserPages();
+    if (this.agent_current_page) {
+      return this.agent_current_page;
+    }
+    const currentTab = this._tabs[this.currentTabIndex];
+    if (currentTab) {
+      const tabPage = this.tabPages.get(currentTab.page_id) ?? null;
+      if (tabPage) {
+        this._setActivePage(tabPage);
+        return tabPage;
+      }
+    }
+    const fallback = this.browser_context?.pages()?.[0] ?? null;
+    this._setActivePage(fallback ?? null);
+    return fallback;
+  }
+
+  update_current_page(
+    page: Page | null,
+    title?: string | null,
+    url?: string | null
+  ) {
+    this._setActivePage(page);
+    this.human_current_page = this.human_current_page ?? page;
+    if (url) {
+      this.currentUrl = normalize_url(url);
+    }
+    if (title) {
+      this.currentTitle = boundBrowserStateTitle(title);
+    }
+  }
+
+  private _buildTabs(): TabInfo[] {
+    if (!this._tabs.length) {
+      const pageId = this._tabCounter++;
+      this._tabs.push(
+        this._createTabInfo({
+          page_id: pageId,
+          url: this.currentUrl,
+          title: this.currentTitle || this.currentUrl,
+        })
+      );
+    } else {
+      const tab = this._tabs[this.currentTabIndex];
+      if (tab && !tab.tab_id) {
+        tab.tab_id = this._formatTabId(tab.page_id);
+      }
+      tab.url = this.currentUrl;
+      tab.title = boundBrowserStateTitle(this.currentTitle || this.currentUrl);
+    }
+    this._syncSessionManagerFromTabs();
+    return this._tabs
+      .slice(0, MAX_BROWSER_STATE_TABS)
+      .map((tab) => this._sanitize_tab_for_exposure(tab));
+  }
+
+  async navigate_to(url: string, options: BrowserNavigationOptions = {}) {
+    const signal = options.signal ?? null;
+    this._throwIfAborted(signal);
+    this._assert_url_allowed(url);
+    const normalized = normalize_url(url);
+    let completedUrl = normalized;
+    const waitUntil = options.wait_until ?? 'domcontentloaded';
+    const timeoutMs = optionalBrowserTimeoutMs(
+      options.timeout_ms,
+      'navigation timeout'
+    );
+    this._recordRecentEvent('navigation_started', { url: normalized });
+    const page = await this._withAbort(this.get_current_page(), signal);
+    if (page?.goto) {
+      const previousPageUrl = page.url();
+      try {
+        this._resetPageLoadingStatus(page);
+        const gotoOptions: Record<string, unknown> = {
+          waitUntil,
+        };
+        if (timeoutMs !== null) {
+          gotoOptions.timeout = timeoutMs;
+        }
+        await this._withAbort(
+          page.goto(normalized, gotoOptions as any),
+          signal
+        );
+        const finalUrl = page.url();
+        try {
+          this._assert_url_allowed(finalUrl);
+        } catch (error) {
+          if (error instanceof URLNotAllowedError) {
+            await this._rollback_disallowed_navigation(page, finalUrl);
+          }
+          throw error;
+        }
+        completedUrl = normalize_url(finalUrl);
+        if (!this._isSameDocumentNavigation(previousPageUrl, finalUrl)) {
+          await this._waitForStableNetwork(page, signal);
+        }
+        const settledUrl = page.url();
+        try {
+          this._assert_url_allowed(settledUrl);
+        } catch (error) {
+          if (error instanceof URLNotAllowedError) {
+            await this._rollback_disallowed_navigation(page, settledUrl);
+          }
+          throw error;
+        }
+        completedUrl = normalize_url(settledUrl);
+      } catch (error) {
+        if (this._isAbortError(error)) {
+          const disallowedPageError =
+            await this._get_disallowed_page_error_after_navigation_error(page);
+          if (disallowedPageError) {
+            throw disallowedPageError;
+          }
+          throw error;
+        }
+        if (error instanceof URLNotAllowedError) {
+          throw error;
+        }
+        const disallowedPageError =
+          await this._get_disallowed_page_error_after_navigation_error(page);
+        if (disallowedPageError) {
+          throw disallowedPageError;
+        }
+        const message = (error as Error).message ?? 'Navigation failed';
+        this._recordRecentEvent('navigation_failed', {
+          url: normalized,
+          error_message: message,
+        });
+        throw new BrowserError(message);
+      }
+    }
+    this._throwIfAborted(signal);
+    if (page) {
+      await this._syncCurrentTabFromPage(page);
+      completedUrl = this.currentUrl || completedUrl;
+    } else {
+      this.currentUrl = normalized;
+      this.currentTitle = boundBrowserStateTitle(normalized);
+      if (this._tabs[this.currentTabIndex]) {
+        this._tabs[this.currentTabIndex].url = normalized;
+        this._tabs[this.currentTabIndex].title =
+          boundBrowserStateTitle(normalized);
+      }
+      this._syncSessionManagerFromTabs();
+    }
+
+    if (this.historyStack[this.historyStack.length - 1] !== completedUrl) {
+      this.historyStack.push(completedUrl);
+    }
+    this._setActivePage(page ?? null);
+    this._recordRecentEvent('navigation_completed', { url: completedUrl });
+    this.cachedBrowserState = null;
+    return this.agent_current_page;
+  }
+
+  async create_new_tab(url: string, options: BrowserNavigationOptions = {}) {
+    const signal = options.signal ?? null;
+    this._throwIfAborted(signal);
+    this._assert_url_allowed(url);
+    const normalized = normalize_url(url);
+    let completedUrl = normalized;
+    const waitUntil = options.wait_until ?? 'domcontentloaded';
+    const timeoutMs = optionalBrowserTimeoutMs(
+      options.timeout_ms,
+      'navigation timeout'
+    );
+    const previousTabIndex = this.currentTabIndex;
+    const previousTab = this._tabs[this.currentTabIndex] ?? null;
+    const newTab: TabInfo = this._createTabInfo({
+      page_id: this._tabCounter++,
+      url: normalized,
+      title: normalized,
+    });
+    this._tabs.push(newTab);
+    this.currentTabIndex = this._tabs.length - 1;
+    this.currentUrl = normalized;
+    this.currentTitle = boundBrowserStateTitle(normalized);
+    this.historyStack.push(normalized);
+    let page: Page | null = null;
+    try {
+      page =
+        (await this._withAbort(
+          this.browser_context?.newPage?.() ?? Promise.resolve(null),
+          signal
+        )) ?? null;
+      if (page) {
+        this._resetPageLoadingStatus(page);
+        const gotoOptions: Record<string, unknown> = {
+          waitUntil,
+        };
+        if (timeoutMs !== null) {
+          gotoOptions.timeout = timeoutMs;
+        }
+        await this._withAbort(
+          page.goto(normalized, gotoOptions as any),
+          signal
+        );
+        const finalUrl = page.url();
+        this._assert_url_allowed(finalUrl);
+        completedUrl = normalize_url(finalUrl);
+        await this._waitForStableNetwork(page, signal);
+        const settledUrl = page.url();
+        this._assert_url_allowed(settledUrl);
+        completedUrl = normalize_url(settledUrl);
+      }
+    } catch (error) {
+      const isAbortError = this._isAbortError(error);
+      let finalError: unknown = error;
+      if (!(finalError instanceof URLNotAllowedError)) {
+        finalError =
+          (await this._get_disallowed_page_error_after_navigation_error(page, {
+            replace_on_failure: false,
+          })) ?? finalError;
+      }
+      const isUrlNotAllowed = finalError instanceof URLNotAllowedError;
+      const message = (finalError as Error).message ?? 'Failed to open new tab';
+      this._recordRecentEvent('tab_navigation_failed', {
+        url: normalized,
+        page_id: newTab.page_id,
+        tab_id: newTab.tab_id,
+        error_message: message,
+      });
+      this.logger.debug(`Failed to open new tab via Playwright: ${message}`);
+      if (page?.close) {
+        try {
+          await page.close();
+        } catch {
+          // Ignore best-effort tab close failures during rollback.
+        }
+      }
+
+      this._tabs = this._tabs.filter((tab) => tab.page_id !== newTab.page_id);
+      this.tabPages.delete(newTab.page_id);
+      if (this.historyStack[this.historyStack.length - 1] === normalized) {
+        this.historyStack.pop();
+      }
+
+      if (this._tabs.length > 0) {
+        let restoredIndex = previousTab
+          ? this._tabs.findIndex((tab) => tab.page_id === previousTab.page_id)
+          : -1;
+        if (restoredIndex === -1) {
+          restoredIndex = Math.min(previousTabIndex, this._tabs.length - 1);
+        }
+        this.currentTabIndex = Math.max(0, restoredIndex);
+        const restoredTab = this._tabs[this.currentTabIndex];
+        this.currentUrl = restoredTab.url;
+        this.currentTitle = boundBrowserStateTitle(restoredTab.title);
+        const restoredPage = this.tabPages.get(restoredTab.page_id) ?? null;
+        this._setActivePage(restoredPage);
+        await this._syncCurrentTabFromPage(restoredPage);
+      } else {
+        this.currentTabIndex = 0;
+        this.currentUrl = 'about:blank';
+        this.currentTitle = 'about:blank';
+        this._setActivePage(null);
+      }
+      this._syncSessionManagerFromTabs();
+      this.cachedBrowserState = null;
+      if (isUrlNotAllowed) {
+        throw finalError;
+      }
+      if (isAbortError) {
+        throw finalError;
+      }
+      throw new BrowserError(message);
+    }
+    this.tabPages.set(newTab.page_id, page);
+    this._syncSessionManagerFromTabs();
+    this._setActivePage(page);
+    if (page) {
+      await this._syncCurrentTabFromPage(page);
+      completedUrl = this.currentUrl || completedUrl;
+    }
+    if (this.historyStack[this.historyStack.length - 1] === normalized) {
+      this.historyStack[this.historyStack.length - 1] = completedUrl;
+    } else if (
+      this.historyStack[this.historyStack.length - 1] !== completedUrl
+    ) {
+      this.historyStack.push(completedUrl);
+    }
+    if (!this.human_current_page) {
+      this.human_current_page = page;
+    }
+    this._recordRecentEvent('tab_created', {
+      url: completedUrl,
+      page_id: newTab.page_id,
+      tab_id: newTab.tab_id,
+    });
+    this._recordRecentEvent('tab_ready', {
+      url: completedUrl,
+      page_id: newTab.page_id,
+      tab_id: newTab.tab_id,
+    });
+    await this.event_bus.dispatch(
+      new TabCreatedEvent({
+        target_id: newTab.target_id ?? newTab.tab_id ?? 'unknown_target',
+        url: completedUrl,
+      })
+    );
+    this.cachedBrowserState = null;
+    return this.agent_current_page;
+  }
+
+  private _resolveTabIndex(identifier: number | string): number {
+    if (typeof identifier === 'string') {
+      const normalized = identifier.trim();
+      if (!normalized) {
+        return -1;
+      }
+      if (normalized === '-1') {
+        return Math.max(0, this._tabs.length - 1);
+      }
+      const byTabId = this._tabs.findIndex((tab) => tab.tab_id === normalized);
+      if (byTabId !== -1) {
+        return byTabId;
+      }
+      const byTargetId = this._tabs.findIndex(
+        (tab) => tab.target_id === normalized
+      );
+      if (byTargetId !== -1) {
+        return byTargetId;
+      }
+      const numeric = /^[+-]?\d+$/.test(normalized)
+        ? Number(normalized)
+        : Number.NaN;
+      if (Number.isSafeInteger(numeric)) {
+        return this._resolveTabIndex(numeric);
+      }
+      return -1;
+    }
+
+    if (identifier === -1) {
+      return Math.max(0, this._tabs.length - 1);
+    }
+    const byId = this._tabs.findIndex((tab) => tab.page_id === identifier);
+    if (byId !== -1) {
+      return byId;
+    }
+    if (identifier >= 0 && identifier < this._tabs.length) {
+      return identifier;
+    }
+    return -1;
+  }
+
+  async switch_to_tab(
+    identifier: number | string,
+    options: BrowserActionOptions = {}
+  ) {
+    const signal = options.signal ?? null;
+    this._throwIfAborted(signal);
+    this._syncTabsWithBrowserPages();
+    const index = this._resolveTabIndex(identifier);
+    const tab = index >= 0 ? (this._tabs[index] ?? null) : null;
+    if (!tab) {
+      throw new Error(`Tab '${identifier}' does not exist`);
+    }
+    if (!tab.tab_id) {
+      tab.tab_id = this._formatTabId(tab.page_id);
+    }
+    this.currentTabIndex = index;
+    this.currentUrl = tab.url;
+    this.currentTitle = boundBrowserStateTitle(tab.title);
+    this._syncSessionManagerFromTabs();
+    const page = this.tabPages.get(tab.page_id) ?? null;
+    this._setActivePage(page);
+    if (page?.bringToFront) {
+      try {
+        await this._withAbort(page.bringToFront(), signal);
+      } catch (error) {
+        if (this._isAbortError(error)) {
+          throw error;
+        }
+        this.logger.debug(`Failed to focus tab: ${(error as Error).message}`);
+      }
+    }
+    await this._waitForLoad(page, 5000, signal);
+    if (page) {
+      await this._assert_page_url_allowed_or_rollback(page);
+      await this._syncCurrentTabFromPage(page);
+    }
+    this._recordRecentEvent('tab_switched', {
+      url: this.active_tab?.url ?? tab.url,
+      page_id: tab.page_id,
+      tab_id: tab.tab_id,
+    });
+    await this.event_bus.dispatch(
+      new AgentFocusChangedEvent({
+        target_id: tab.target_id ?? tab.tab_id,
+        url: this.active_tab?.url ?? tab.url,
+      })
+    );
+    this.cachedBrowserState = null;
+    return page;
+  }
+
+  async close_tab(identifier: number | string) {
+    this._syncTabsWithBrowserPages();
+    const index = this._resolveTabIndex(identifier);
+    if (index < 0 || index >= this._tabs.length) {
+      throw new Error(`Tab '${identifier}' does not exist`);
+    }
+    const closingTab = this._tabs[index];
+    if (!closingTab.tab_id) {
+      closingTab.tab_id = this._formatTabId(closingTab.page_id);
+    }
+    const closingPage = this.tabPages.get(closingTab.page_id) ?? null;
+    if (closingPage?.close) {
+      try {
+        await closingPage.close();
+      } catch (error) {
+        this.logger.debug(`Failed to close page: ${(error as Error).message}`);
+      }
+    }
+    this.tabPages.delete(closingTab.page_id);
+    this._recordRecentEvent('tab_closed', {
+      url: closingTab.url,
+      page_id: closingTab.page_id,
+      tab_id: closingTab.tab_id,
+    });
+    this._tabs.splice(index, 1);
+    if (this.currentTabIndex >= this._tabs.length) {
+      this.currentTabIndex = Math.max(0, this._tabs.length - 1);
+    }
+    this._syncSessionManagerFromTabs();
+    const tab = this._tabs[this.currentTabIndex] ?? null;
+    const current = tab ? (this.tabPages.get(tab.page_id) ?? null) : null;
+    this._setActivePage(current);
+    this.cachedBrowserState = null;
+    if (this._tabs.length) {
+      const tab = this._tabs[this.currentTabIndex];
+      this.currentUrl = tab.url;
+      this.currentTitle = boundBrowserStateTitle(tab.title);
+      await this.event_bus.dispatch(
+        new AgentFocusChangedEvent({
+          target_id: tab.target_id ?? tab.tab_id ?? 'unknown_target',
+          url: tab.url,
+        })
+      );
+    } else {
+      this.currentUrl = 'about:blank';
+      this.currentTitle = 'about:blank';
+      this._setActivePage(null);
+    }
+    await this.event_bus.dispatch(
+      new TabClosedEvent({
+        target_id: closingTab.target_id ?? closingTab.tab_id,
+      })
+    );
+  }
+
+  async wait(seconds: number, options: BrowserActionOptions = {}) {
+    const signal = options.signal ?? null;
+    this._throwIfAborted(signal);
+    const boundedSeconds = requireBrowserTimeoutSeconds(
+      seconds,
+      'wait duration'
+    );
+    const delayMs = boundedSeconds * 1000;
+    if (delayMs <= 0) {
+      return;
+    }
+    const page = await this.get_current_page();
+    try {
+      await this._waitWithAbort(delayMs, signal);
+    } finally {
+      await this.validate_page_after_action(page, signal);
+    }
+  }
+
+  async send_keys(keys: string, options: BrowserActionOptions = {}) {
+    const signal = options.signal ?? null;
+    this._throwIfAborted(signal);
+    const page = await this._withAbort(this.get_current_page(), signal);
+    await this.validate_page_after_action(page, signal);
+    const keyboard = page?.keyboard;
+    if (!keyboard) {
+      throw new BrowserError(
+        'Keyboard input is not available on the current page.'
+      );
+    }
+
+    try {
+      try {
+        await this._withAbort(keyboard.press(keys), signal);
+      } catch (error) {
+        if (error instanceof Error && error.message.includes('Unknown key')) {
+          for (const char of keys) {
+            await this._withAbort(keyboard.press(char), signal);
+          }
+          return;
+        }
+        throw error;
+      }
+    } finally {
+      await this._waitForLoad(page, 5000, signal);
+      if (page) {
+        await this._assert_page_url_allowed_or_rollback(page);
+        await this._syncCurrentTabFromPage(page);
+      }
+      this.cachedBrowserState = null;
+    }
+  }
+
+  async click_coordinates(
+    coordinate_x: number,
+    coordinate_y: number,
+    options: BrowserActionOptions & {
+      button?: 'left' | 'right' | 'middle';
+    } = {}
+  ) {
+    const signal = options.signal ?? null;
+    this._throwIfAborted(signal);
+    requireFiniteBrowserActionNumber(coordinate_x, 'coordinate_x');
+    requireFiniteBrowserActionNumber(coordinate_y, 'coordinate_y');
+    const page = await this._withAbort(this.get_current_page(), signal);
+    await this.validate_page_after_action(page, signal);
+    if (!page?.mouse?.click) {
+      throw new BrowserError(
+        'Unable to perform coordinate click on the current page.'
+      );
+    }
+
+    try {
+      await this._withAbort(
+        page.mouse.click(coordinate_x, coordinate_y, {
+          button: options.button ?? 'left',
+        }),
+        signal
+      );
+    } finally {
+      await this.validate_page_after_action(page, signal);
+    }
+  }
+
+  async scroll(
+    direction: 'up' | 'down' | 'left' | 'right',
+    amount: number,
+    options: BrowserActionOptions & { node?: DOMElementNode | null } = {}
+  ) {
+    const signal = options.signal ?? null;
+    this._throwIfAborted(signal);
+    const normalizedAmount = Math.max(
+      Math.floor(
+        Math.abs(requireFiniteBrowserActionNumber(amount, 'scroll amount'))
+      ),
+      0
+    );
+    if (normalizedAmount === 0) {
+      return;
+    }
+
+    const page = await this._withAbort(this.get_current_page(), signal);
+    await this.validate_page_after_action(page, signal);
+    if (!page?.evaluate) {
+      throw new BrowserError('Unable to access current page for scrolling.');
+    }
+
+    try {
+      const node = options.node ?? null;
+      if (node?.xpath) {
+        const scrolled = await this._withAbort(
+          page.evaluate(
+            (payload: {
+              xpath: string;
+              direction: 'up' | 'down' | 'left' | 'right';
+              amount: number;
+            }) => {
+              const root = document.evaluate(
+                payload.xpath,
+                document,
+                null,
+                XPathResult.FIRST_ORDERED_NODE_TYPE,
+                null
+              ).singleNodeValue as HTMLElement | null;
+              if (!root) {
+                return false;
+              }
+              const topDelta =
+                payload.direction === 'up'
+                  ? -payload.amount
+                  : payload.direction === 'down'
+                    ? payload.amount
+                    : 0;
+              const leftDelta =
+                payload.direction === 'left'
+                  ? -payload.amount
+                  : payload.direction === 'right'
+                    ? payload.amount
+                    : 0;
+              root.scrollBy({
+                top: topDelta,
+                left: leftDelta,
+                behavior: 'auto',
+              });
+              return true;
+            },
+            { xpath: node.xpath, direction, amount: normalizedAmount }
+          ),
+          signal
+        );
+        if (scrolled) {
+          return;
+        }
+      }
+
+      if (direction === 'up' || direction === 'down') {
+        const pixels =
+          direction === 'down' ? normalizedAmount : -normalizedAmount;
+        await this._withAbort(this._scrollContainer(pixels), signal);
+        return;
+      }
+
+      const horizontalDelta =
+        direction === 'left' ? -normalizedAmount : normalizedAmount;
+      await this._withAbort(
+        page.evaluate((x: number) => window.scrollBy(x, 0), horizontalDelta),
+        signal
+      );
+    } finally {
+      await this.validate_page_after_action(page, signal);
+    }
+  }
+
+  async scroll_to_text(
+    text: string,
+    options: BrowserActionOptions & { direction?: 'up' | 'down' } = {}
+  ) {
+    const signal = options.signal ?? null;
+    this._throwIfAborted(signal);
+    const page = await this._withAbort(this.get_current_page(), signal);
+    await this.validate_page_after_action(page, signal);
+    if (!page?.evaluate) {
+      throw new BrowserError('Unable to access page for scrolling.');
+    }
+    const boundedText = String(text).slice(0, MAX_SCROLL_TEXT_QUERY_CHARS);
+    if (!boundedText) {
+      throw new BrowserError('Text to scroll to must not be empty.');
+    }
+
+    try {
+      const rawResult = await this._withAbort(
+        page.evaluate(
+          buildScrollToTextExpression(boundedText, options.direction ?? 'down')
+        ),
+        signal
+      );
+      const result: ScrollToTextPageResult =
+        rawResult && typeof rawResult === 'object'
+          ? (rawResult as ScrollToTextPageResult)
+          : {
+              found: rawResult === true,
+              truncated: false,
+              visitedNodes: 0,
+              scannedChars: 0,
+            };
+
+      if (!result.found) {
+        const suffix = result.truncated
+          ? ' before the bounded page scan reached its safety limit'
+          : '';
+        throw new BrowserError(
+          `Text '${boundedText}' not found on page${suffix}`
+        );
+      }
+    } finally {
+      await this.validate_page_after_action(page, signal);
+    }
+  }
+
+  async get_dropdown_options(
+    element_node: DOMElementNode,
+    options: BrowserActionOptions = {}
+  ) {
+    const signal = options.signal ?? null;
+    this._throwIfAborted(signal);
+    const page = await this._withAbort(this.get_current_page(), signal);
+    await this.validate_page_after_action(page, signal);
+    if (!page?.evaluate) {
+      throw new BrowserError(
+        'Unable to evaluate dropdown options on current page.'
+      );
+    }
+    if (!element_node?.xpath) {
+      throw new BrowserError('DOM element does not include an XPath selector.');
+    }
+
+    let payload: unknown;
+    try {
+      payload = await this._withAbort(
+        page.evaluate(
+          ({
+            xpath,
+            maxOptions,
+            maxScanNodes,
+            maxFieldChars,
+            maxPayloadChars,
+          }: {
+            xpath: string;
+            maxOptions: number;
+            maxScanNodes: number;
+            maxFieldChars: number;
+            maxPayloadChars: number;
+          }) => {
+            const element = document.evaluate(
+              xpath,
+              document,
+              null,
+              XPathResult.FIRST_ORDERED_NODE_TYPE,
+              null
+            ).singleNodeValue as HTMLElement | null;
+            if (!element) return null;
+
+            const options: Array<{
+              text: string;
+              value: string;
+              index: number;
+            }> = [];
+            let remainingChars = Math.max(0, maxPayloadChars);
+            let contentTruncated = false;
+            const [take] = [
+              (value: string) => {
+                const scanLimit = Math.min(
+                  value.length,
+                  maxFieldChars + 1,
+                  remainingChars + 1
+                );
+                const scanned = value.slice(0, scanLimit).trim();
+                const allowed = Math.max(
+                  0,
+                  Math.min(maxFieldChars, remainingChars)
+                );
+                const bounded = scanned.slice(0, allowed);
+                remainingChars -= bounded.length;
+                if (
+                  scanLimit < value.length ||
+                  bounded.length < scanned.length
+                ) {
+                  contentTruncated = true;
+                }
+                return bounded;
+              },
+            ];
+            const [pushOption] = [
+              (text: string, value: string, index: number) => {
+                if (remainingChars <= 0) {
+                  contentTruncated = true;
+                  return false;
+                }
+                options.push({ text: take(text), value: take(value), index });
+                return remainingChars > 0;
+              },
+            ];
+
+            if (element.tagName?.toLowerCase() === 'select') {
+              const source = (element as HTMLSelectElement).options;
+              const count = Math.min(source.length, maxOptions);
+              for (let index = 0; index < count; index += 1) {
+                const opt = source.item(index);
+                if (!opt) continue;
+                if (
+                  !pushOption(opt.textContent ?? '', opt.value ?? '', index)
+                ) {
+                  break;
+                }
+              }
+              return {
+                type: 'select',
+                options,
+                truncated: contentTruncated || source.length > options.length,
+              };
+            }
+
+            const ariaRoles = new Set(['menu', 'listbox', 'combobox']);
+            const role = element.getAttribute('role');
+            if (role && ariaRoles.has(role)) {
+              const walker = document.createTreeWalker(
+                element,
+                NodeFilter.SHOW_ELEMENT
+              );
+              let candidate = walker.nextNode() as Element | null;
+              let scannedNodes = 0;
+              let optionIndex = 0;
+              while (
+                candidate &&
+                scannedNodes < maxScanNodes &&
+                options.length < maxOptions
+              ) {
+                const current = candidate;
+                candidate = walker.nextNode() as Element | null;
+                scannedNodes += 1;
+                const candidateRole = current.getAttribute('role');
+                if (
+                  candidateRole !== 'menuitem' &&
+                  candidateRole !== 'option'
+                ) {
+                  continue;
+                }
+                const text = current.textContent ?? '';
+                if (!pushOption(text, text, optionIndex)) break;
+                optionIndex += 1;
+              }
+              return {
+                type: 'aria',
+                options,
+                truncated: contentTruncated || Boolean(candidate),
+              };
+            }
+
+            return null;
+          },
+          {
+            xpath: element_node.xpath,
+            maxOptions: MAX_DROPDOWN_OPTIONS,
+            maxScanNodes: MAX_DROPDOWN_SCANNED_OPTIONS,
+            maxFieldChars: MAX_DROPDOWN_FIELD_CHARS,
+            maxPayloadChars: MAX_DROPDOWN_PAYLOAD_CHARS,
+          }
+        ),
+        signal
+      );
+    } finally {
+      await this.validate_page_after_action(page, signal);
+    }
+
+    if (!payload || !Array.isArray((payload as any).options)) {
+      throw new BrowserError('No options found for the specified dropdown.');
+    }
+
+    const normalized = normalizeDropdownOptions(
+      (payload as any).options,
+      (payload as any).truncated === true
+    );
+    const normalizedOptions = normalized.options;
+
+    if (normalizedOptions.length === 0) {
+      throw new BrowserError('No options found for the specified dropdown.');
+    }
+
+    const serialized = serializeDropdownOptions(normalizedOptions);
+    const formatted = formatDropdownOptions(
+      normalizedOptions,
+      normalized.truncated || serialized.truncated
+    );
+    const guidance =
+      'Prefer exact text first; if needed select_dropdown_option also supports case-insensitive text/value matching.';
+    const message = `${formatted.text}\n${guidance}`.slice(
+      0,
+      MAX_DROPDOWN_MESSAGE_CHARS
+    );
+    const indexForMemory = element_node.highlight_index ?? 'unknown';
+
+    return {
+      type: String((payload as any).type ?? 'unknown'),
+      options: serialized.json,
+      formatted_options: message,
+      message,
+      short_term_memory: message,
+      long_term_memory: `Found dropdown options for index ${indexForMemory}.`,
+    } satisfies Record<string, string>;
+  }
+
+  async select_dropdown_option(
+    element_node: DOMElementNode,
+    text: string,
+    options: BrowserActionOptions = {}
+  ) {
+    const signal = options.signal ?? null;
+    this._throwIfAborted(signal);
+    if (!element_node?.xpath) {
+      throw new BrowserError('DOM element does not include an XPath selector.');
+    }
+
+    const page = await this._withAbort(this.get_current_page(), signal);
+    if (!page) {
+      throw new BrowserError('No active page for selection.');
+    }
+
+    await this.validate_page_after_action(page, signal);
+    try {
+      const formatAvailableOptions = (
+        opts: unknown,
+        alreadyTruncated = false
+      ) => {
+        const normalized = normalizeDropdownOptions(opts, alreadyTruncated);
+        const formatted = formatDropdownOptions(
+          normalized.options,
+          normalized.truncated
+        ).text;
+        return formatted
+          .split('\n')
+          .map((line) =>
+            line.startsWith('...')
+              ? line
+              : `  - [${line.replace(': text=', '] text=')}`
+          )
+          .join('\n');
+      };
+
+      const pageFrames = (() => {
+        const framesAccessor = (page as any).frames;
+        if (typeof framesAccessor === 'function') {
+          try {
+            const result = framesAccessor.call(page);
+            return Array.isArray(result) ? result : [];
+          } catch {
+            return [];
+          }
+        }
+        return Array.isArray(framesAccessor) ? framesAccessor : [];
+      })();
+
+      for (const frame of pageFrames) {
+        try {
+          const typeInfo: any = await this._withAbort(
+            frame.evaluate((xpath: string) => {
+              const element = document.evaluate(
+                xpath,
+                document,
+                null,
+                XPathResult.FIRST_ORDERED_NODE_TYPE,
+                null
+              ).singleNodeValue as HTMLElement | null;
+              if (!element) return { found: false };
+              const tagName = element.tagName?.toLowerCase();
+              const role = element.getAttribute?.('role');
+              if (tagName === 'select') return { found: true, type: 'select' };
+              if (role && ['menu', 'listbox', 'combobox'].includes(role))
+                return { found: true, type: 'aria' };
+              return { found: false };
+            }, element_node.xpath),
+            signal
+          );
+
+          if (!typeInfo?.found) {
+            continue;
+          }
+
+          if (typeInfo.type === 'select') {
+            const selection: any = await this._withAbort(
+              frame.evaluate(
+                ({
+                  xpath,
+                  optionText,
+                  maxScanOptions,
+                  maxReturnedOptions,
+                  maxFieldChars,
+                  maxPayloadChars,
+                }: {
+                  xpath: string;
+                  optionText: string;
+                  maxScanOptions: number;
+                  maxReturnedOptions: number;
+                  maxFieldChars: number;
+                  maxPayloadChars: number;
+                }) => {
+                  const root = document.evaluate(
+                    xpath,
+                    document,
+                    null,
+                    XPathResult.FIRST_ORDERED_NODE_TYPE,
+                    null
+                  ).singleNodeValue as HTMLSelectElement | null;
+                  if (!root || root.tagName?.toLowerCase() !== 'select') {
+                    return { found: false };
+                  }
+
+                  const targetRaw = optionText.trim();
+                  const targetLower = optionText.trim().toLowerCase();
+                  const options: Array<{
+                    index: number;
+                    text: string;
+                    value: string;
+                  }> = [];
+                  let remainingChars = Math.max(0, maxPayloadChars);
+                  let contentTruncated = false;
+                  let exactMatch = -1;
+                  let caseInsensitiveMatch = -1;
+                  const [scanText] = [
+                    (value: string) => {
+                      if (value.length > maxFieldChars) contentTruncated = true;
+                      return value.slice(0, maxFieldChars + 1).trim();
+                    },
+                  ];
+                  const [take] = [
+                    (value: string) => {
+                      const allowed = Math.max(
+                        0,
+                        Math.min(maxFieldChars, remainingChars)
+                      );
+                      const bounded = value.slice(0, allowed);
+                      remainingChars -= bounded.length;
+                      if (bounded.length < value.length) {
+                        contentTruncated = true;
+                      }
+                      return bounded;
+                    },
+                  ];
+                  const scanCount = Math.min(
+                    root.options.length,
+                    maxScanOptions
+                  );
+                  for (let index = 0; index < scanCount; index += 1) {
+                    const option = root.options.item(index);
+                    if (!option) continue;
+                    const optionTextValue = scanText(option.textContent ?? '');
+                    const optionValue = scanText(option.value ?? '');
+                    if (
+                      optionTextValue === targetRaw ||
+                      optionValue === targetRaw
+                    ) {
+                      exactMatch = index;
+                    } else if (
+                      caseInsensitiveMatch < 0 &&
+                      (optionTextValue.toLowerCase() === targetLower ||
+                        optionValue.toLowerCase() === targetLower)
+                    ) {
+                      caseInsensitiveMatch = index;
+                    }
+                    if (
+                      options.length < maxReturnedOptions &&
+                      remainingChars > 0
+                    ) {
+                      options.push({
+                        index,
+                        text: take(optionTextValue),
+                        value: take(optionValue),
+                      });
+                    } else {
+                      contentTruncated = true;
+                    }
+                    if (exactMatch >= 0) break;
+                  }
+                  const matchedIndex =
+                    exactMatch >= 0 ? exactMatch : caseInsensitiveMatch;
+                  if (matchedIndex < 0) {
+                    return {
+                      found: true,
+                      success: false,
+                      options,
+                      truncated:
+                        contentTruncated ||
+                        root.options.length > scanCount ||
+                        root.options.length > options.length,
+                    };
+                  }
+
+                  const matchedOption = root.options.item(matchedIndex);
+                  if (!matchedOption) return { found: true, success: false };
+                  root.selectedIndex = matchedIndex;
+                  root.dispatchEvent(new Event('input', { bubbles: true }));
+                  root.dispatchEvent(new Event('change', { bubbles: true }));
+                  const selectedOption =
+                    root.selectedIndex >= 0
+                      ? root.options[root.selectedIndex]
+                      : null;
+                  const selectedText = scanText(
+                    selectedOption?.textContent ?? ''
+                  ).slice(0, maxFieldChars);
+                  const selectedValue = scanText(root.value ?? '').slice(
+                    0,
+                    maxFieldChars
+                  );
+                  const verified = root.selectedIndex === matchedIndex;
+
+                  return {
+                    found: true,
+                    success: verified,
+                    selectedText,
+                    selectedValue,
+                    matched: {
+                      index: matchedIndex,
+                      text: scanText(matchedOption.textContent ?? '').slice(
+                        0,
+                        maxFieldChars
+                      ),
+                      value: scanText(matchedOption.value ?? '').slice(
+                        0,
+                        maxFieldChars
+                      ),
+                    },
+                  };
+                },
+                {
+                  xpath: element_node.xpath,
+                  optionText: text,
+                  maxScanOptions: MAX_DROPDOWN_SCANNED_OPTIONS,
+                  maxReturnedOptions: MAX_DROPDOWN_OPTIONS,
+                  maxFieldChars: MAX_DROPDOWN_FIELD_CHARS,
+                  maxPayloadChars: MAX_DROPDOWN_PAYLOAD_CHARS,
+                }
+              ),
+              signal
+            );
+
+            if (selection?.found && selection.success) {
+              const matchedText = String(selection.matched?.text ?? text).slice(
+                0,
+                MAX_DROPDOWN_FIELD_CHARS
+              );
+              const matchedValue = String(selection.matched?.value ?? '').slice(
+                0,
+                MAX_DROPDOWN_FIELD_CHARS
+              );
+              const msg = `Selected option ${matchedText} (${matchedValue})`;
+              return {
+                message: msg,
+                short_term_memory: msg,
+                long_term_memory: msg,
+                matched_text: String(matchedText),
+                matched_value: String(matchedValue),
+              } satisfies Record<string, string>;
+            }
+            if (selection?.found) {
+              const details = formatAvailableOptions(
+                selection.options,
+                selection.truncated === true
+              );
+              throw new BrowserError(
+                `Could not select option '${text}' for index ${element_node.highlight_index ?? 'unknown'}.\nAvailable options:\n${details}`
+              );
+            }
+            continue;
+          }
+
+          const clicked: any = await this._withAbort(
+            frame.evaluate(
+              ({
+                xpath,
+                optionText,
+                maxScanOptions,
+                maxReturnedOptions,
+                maxFieldChars,
+                maxPayloadChars,
+              }: {
+                xpath: string;
+                optionText: string;
+                maxScanOptions: number;
+                maxReturnedOptions: number;
+                maxFieldChars: number;
+                maxPayloadChars: number;
+              }) => {
+                const root = document.evaluate(
+                  xpath,
+                  document,
+                  null,
+                  XPathResult.FIRST_ORDERED_NODE_TYPE,
+                  null
+                ).singleNodeValue as HTMLElement | null;
+                if (!root) return false;
+                const walker = document.createTreeWalker(
+                  root,
+                  NodeFilter.SHOW_ELEMENT
+                );
+                const targetRaw = optionText.trim();
+                const targetLower = optionText.trim().toLowerCase();
+                const options: Array<{
+                  index: number;
+                  text: string;
+                  value: string;
+                }> = [];
+                let remainingChars = Math.max(0, maxPayloadChars);
+                let contentTruncated = false;
+                let exactMatch: {
+                  index: number;
+                  node: HTMLElement;
+                  text: string;
+                } | null = null;
+                let caseInsensitiveMatch: {
+                  index: number;
+                  node: HTMLElement;
+                  text: string;
+                } | null = null;
+                const [scanText] = [
+                  (value: string) => {
+                    if (value.length > maxFieldChars) contentTruncated = true;
+                    return value.slice(0, maxFieldChars + 1).trim();
+                  },
+                ];
+                const [take] = [
+                  (value: string) => {
+                    const allowed = Math.max(
+                      0,
+                      Math.min(maxFieldChars, remainingChars)
+                    );
+                    const bounded = value.slice(0, allowed);
+                    remainingChars -= bounded.length;
+                    if (bounded.length < value.length) contentTruncated = true;
+                    return bounded;
+                  },
+                ];
+                let candidate = walker.nextNode() as HTMLElement | null;
+                let scannedNodes = 0;
+                let optionIndex = 0;
+                while (candidate && scannedNodes < maxScanOptions) {
+                  const current = candidate;
+                  candidate = walker.nextNode() as HTMLElement | null;
+                  scannedNodes += 1;
+                  const role = current.getAttribute('role');
+                  if (role !== 'menuitem' && role !== 'option') continue;
+                  const index = optionIndex;
+                  optionIndex += 1;
+                  const optionTextValue = scanText(current.textContent ?? '');
+                  if (optionTextValue === targetRaw) {
+                    exactMatch = {
+                      index,
+                      node: current,
+                      text: optionTextValue,
+                    };
+                  } else if (
+                    !caseInsensitiveMatch &&
+                    optionTextValue.toLowerCase() === targetLower
+                  ) {
+                    caseInsensitiveMatch = {
+                      index,
+                      node: current,
+                      text: optionTextValue,
+                    };
+                  }
+                  if (
+                    options.length < maxReturnedOptions &&
+                    remainingChars > 0
+                  ) {
+                    options.push({
+                      index,
+                      text: take(optionTextValue),
+                      value: take(optionTextValue),
+                    });
+                  } else {
+                    contentTruncated = true;
+                  }
+                  if (exactMatch) break;
+                }
+                const matched = exactMatch ?? caseInsensitiveMatch;
+                if (!matched) {
+                  return {
+                    found: true,
+                    success: false,
+                    options,
+                    truncated: contentTruncated || Boolean(candidate),
+                  };
+                }
+                matched.node.click();
+                return {
+                  found: true,
+                  success: true,
+                  matched: {
+                    index: matched.index,
+                    text: matched.text.slice(0, maxFieldChars),
+                    value: matched.text.slice(0, maxFieldChars),
+                  },
+                };
+              },
+              {
+                xpath: element_node.xpath,
+                optionText: text,
+                maxScanOptions: MAX_DROPDOWN_SCANNED_OPTIONS,
+                maxReturnedOptions: MAX_DROPDOWN_OPTIONS,
+                maxFieldChars: MAX_DROPDOWN_FIELD_CHARS,
+                maxPayloadChars: MAX_DROPDOWN_PAYLOAD_CHARS,
+              }
+            ),
+            signal
+          );
+
+          if (clicked?.found && clicked.success) {
+            const matchedText = String(clicked.matched?.text ?? text).slice(
+              0,
+              MAX_DROPDOWN_FIELD_CHARS
+            );
+            const msg = `Selected menu item ${matchedText}`;
+            return {
+              message: msg,
+              short_term_memory: msg,
+              long_term_memory: msg,
+              matched_text: String(matchedText),
+            } satisfies Record<string, string>;
+          }
+          if (clicked?.found) {
+            const details = formatAvailableOptions(
+              clicked.options,
+              clicked.truncated === true
+            );
+            throw new BrowserError(
+              `Could not select option '${text}' for index ${element_node.highlight_index ?? 'unknown'}.\nAvailable options:\n${details}`
+            );
+          }
+        } catch (error) {
+          if (error instanceof BrowserError) {
+            throw error;
+          }
+          continue;
+        }
+      }
+
+      throw new BrowserError(
+        `Could not select option '${text}' for index ${element_node.highlight_index ?? 'unknown'}`
+      );
+    } finally {
+      await this.validate_page_after_action(page, signal);
+    }
+  }
+
+  async upload_file(
+    element_node: DOMElementNode,
+    file_path: string,
+    options: BrowserActionOptions = {}
+  ) {
+    const signal = options.signal ?? null;
+    this._throwIfAborted(signal);
+    const locator = await this.get_locate_element(element_node);
+    if (!locator) {
+      throw new Error('Element not found');
+    }
+    if (!fs.existsSync(file_path)) {
+      throw new Error(`File does not exist: ${file_path}`);
+    }
+
+    const locatorWithUpload = locator as unknown as {
+      setInputFiles?: (
+        filePath: string,
+        options?: { timeout?: number }
+      ) => Promise<void>;
+    };
+    if (typeof locatorWithUpload.setInputFiles !== 'function') {
+      throw new Error('Element does not support file upload');
+    }
+
+    const page = await this._withAbort(this.get_current_page(), signal);
+    await this.validate_page_after_action(page, signal);
+    try {
+      await this._withAbort(
+        locatorWithUpload.setInputFiles(file_path, { timeout: 5000 }),
+        signal
+      );
+    } finally {
+      await this.validate_page_after_action(page, signal);
+    }
+  }
+
+  async go_back(options: BrowserActionOptions = {}) {
+    const signal = options.signal ?? null;
+    this._throwIfAborted(signal);
+    const page = await this._withAbort(this.get_current_page(), signal);
+    if (!page?.goBack) {
+      return;
+    }
+
+    await this.validate_page_after_action(page, signal);
+    const previousUrl = this.currentUrl;
+    try {
+      this._resetPageLoadingStatus(page);
+      await this._withAbort(page.goBack(), signal);
+      const navigatedUrl = page.url();
+      if (!this._isSameDocumentNavigation(previousUrl, navigatedUrl)) {
+        await this._waitForStableNetwork(page, signal);
+      }
+      await this._assert_page_url_allowed_or_rollback(page);
+    } catch (error) {
+      if (this._isAbortError(error)) {
+        throw error;
+      }
+      if (error instanceof URLNotAllowedError) {
+        throw error;
+      }
+      this.logger.debug(`Failed to navigate back: ${(error as Error).message}`);
+    } finally {
+      await this.validate_page_after_action(page, signal);
+    }
+    this._throwIfAborted(signal);
+    await this._syncCurrentTabFromPage(page);
+    const currentUrl = this.currentUrl;
+
+    if (currentUrl && currentUrl !== previousUrl) {
+      const existingIndex = this.historyStack.lastIndexOf(currentUrl);
+      if (existingIndex !== -1) {
+        this.historyStack = this.historyStack.slice(0, existingIndex + 1);
+      } else if (
+        this.historyStack[this.historyStack.length - 1] !== currentUrl
+      ) {
+        this.historyStack.push(currentUrl);
+      }
+    }
+    this.cachedBrowserState = null;
+    this._recordRecentEvent('navigation_back', { url: currentUrl });
+  }
+
+  async get_dom_element_by_index(
+    _index: number,
+    options: BrowserActionOptions = {}
+  ) {
+    const selectorMap = await this.get_selector_map(options);
+    return selectorMap?.[_index] ?? null;
+  }
+
+  set_downloaded_files(files: string[]) {
+    if (!Array.isArray(files)) {
+      return;
+    }
+    this.downloaded_files = [...files];
+  }
+
+  add_downloaded_file(filePath: string) {
+    if (!filePath) {
+      return;
+    }
+    if (!this.downloaded_files.includes(filePath)) {
+      this.downloaded_files = [...this.downloaded_files, filePath];
+      this.logger.info(
+        `📁 Added download to session tracking (total: ${this.downloaded_files.length} files)`
+      );
+    }
+  }
+
+  get_downloaded_files() {
+    this.logger.debug(
+      `📁 Retrieved ${this.downloaded_files.length} downloaded files from session tracking`
+    );
+    return [...this.downloaded_files];
+  }
+
+  set_auto_download_pdfs(enabled: boolean) {
+    this._autoDownloadPdfs = Boolean(enabled);
+    this.logger.info(
+      `📄 PDF auto-download ${this._autoDownloadPdfs ? 'enabled' : 'disabled'}`
+    );
+  }
+
+  auto_download_pdfs() {
+    return this._autoDownloadPdfs;
+  }
+
+  static async get_unique_filename(directory: string, filename: string) {
+    const resolvedDir = path.resolve(directory);
+    const safeFilename = BrowserSession._sanitize_download_filename(filename);
+    const parsed = path.parse(safeFilename);
+    let candidate = safeFilename;
+    let counter = 1;
+    while (fs.existsSync(path.join(resolvedDir, candidate))) {
+      candidate = `${parsed.name} (${counter})${parsed.ext}`;
+      counter += 1;
+    }
+    return candidate;
+  }
+
+  private async _cancel_download_best_effort(download: any) {
+    if (typeof download?.cancel !== 'function') {
+      return;
+    }
+    try {
+      await download.cancel();
+    } catch (error) {
+      this.logger.debug(
+        `Failed to cancel blocked download: ${(error as Error).message}`
+      );
+    }
+  }
+
+  private async _assert_download_url_allowed(
+    download: any,
+    downloadUrl: string
+  ) {
+    try {
+      this._assert_url_allowed(downloadUrl);
+    } catch (error) {
+      await this._cancel_download_best_effort(download);
+      throw error;
+    }
+  }
+
+  private static _sanitize_download_filename(filename: string) {
+    const basename = String(filename || '')
+      .replace(/\0/g, '')
+      .replace(/\\/g, '/')
+      .split('/')
+      .pop()
+      ?.trim();
+    if (!basename || basename === '.' || basename === '..') {
+      return 'download';
+    }
+    const sanitized = basename
+      .replace(/[:*?"<>|]+/g, '_')
+      .replace(/\s+/g, ' ')
+      .trim();
+    return sanitized || 'download';
+  }
+
+  private static _redact_url_for_logging(url: string | null | undefined) {
+    const raw = String(url ?? '');
+    if (!raw) {
+      return raw;
+    }
+    if (/^data:/i.test(raw)) {
+      return 'data:<redacted>';
+    }
+
+    try {
+      const parsed = new URL(raw);
+      parsed.username = '';
+      parsed.password = '';
+      const [withoutHash] = parsed.href.split('#', 1);
+      const [withoutQuery] = withoutHash.split('?', 1);
+      return `${withoutQuery}${parsed.search ? '?<redacted>' : ''}${
+        parsed.hash ? '#<redacted>' : ''
+      }`;
+    } catch {
+      const queryIndex = raw.indexOf('?');
+      const hashIndex = raw.indexOf('#');
+      const firstSensitiveIndex = [queryIndex, hashIndex]
+        .filter((index) => index >= 0)
+        .sort((a, b) => a - b)[0];
+      if (firstSensitiveIndex === undefined) {
+        return raw;
+      }
+      return `${raw.slice(0, firstSensitiveIndex)}${
+        queryIndex >= 0 ? '?<redacted>' : ''
+      }${hashIndex >= 0 ? '#<redacted>' : ''}`;
+    }
+  }
+
+  private static _redact_urls_in_text(value: string) {
+    return value.replace(/\b(?:https?|blob):[^\s"'<>]+/gi, (match) =>
+      BrowserSession._redact_url_for_logging(match)
+    );
+  }
+
+  private static _same_origin(left: string, right: string) {
+    try {
+      return new URL(left).origin === new URL(right).origin;
+    } catch {
+      return false;
+    }
+  }
+
+  async get_selector_map(options: BrowserActionOptions = {}) {
+    if (!this.cachedBrowserState) {
+      await this.get_browser_state_with_recovery({
+        cache_clickable_elements_hashes: true,
+        include_screenshot: false,
+        signal: options.signal ?? null,
+      });
+    }
+    return this.cachedBrowserState?.selector_map ?? {};
+  }
+
+  static is_file_input(node: DOMElementNode | null) {
+    if (!node) {
+      return false;
+    }
+    return (
+      node.tag_name?.toLowerCase() === 'input' &&
+      (node.attributes?.type ?? '').toLowerCase() === 'file'
+    );
+  }
+
+  is_file_input(node: DOMElementNode | null) {
+    return BrowserSession.is_file_input(node);
+  }
+
+  async find_file_upload_element_by_index(
+    index: number,
+    maxHeight = 3,
+    maxDescendantDepth = 3,
+    options: BrowserActionOptions = {}
+  ) {
+    const selectorMap = await this.get_selector_map(options);
+    const root = selectorMap[index];
+    if (!root) {
+      return null;
+    }
+
+    const findInDescendants = (
+      node: DOMElementNode,
+      depth: number
+    ): DOMElementNode | null => {
+      if (depth < 0) {
+        return null;
+      }
+      if (BrowserSession.is_file_input(node)) {
+        return node;
+      }
+      for (const child of node.children) {
+        if (child instanceof DOMElementNode) {
+          const found = findInDescendants(child, depth - 1);
+          if (found) {
+            return found;
+          }
+        }
+      }
+      return null;
+    };
+
+    let current: DOMElementNode | null = root;
+    let remainingHeight = maxHeight;
+    while (current && remainingHeight >= 0) {
+      const direct = findInDescendants(current, maxDescendantDepth);
+      if (direct) {
+        return direct;
+      }
+
+      if (current.parent) {
+        for (const sibling of current.parent.children) {
+          if (sibling instanceof DOMElementNode && sibling !== current) {
+            const fromSibling = findInDescendants(sibling, maxDescendantDepth);
+            if (fromSibling) {
+              return fromSibling;
+            }
+          }
+        }
+      }
+
+      current = current.parent;
+      remainingHeight -= 1;
+    }
+
+    return null;
+  }
+
+  async get_locate_element(node: DOMElementNode): Promise<Locator | null> {
+    const page = await this.get_current_page();
+    if (!page || !node?.xpath) {
+      return null;
+    }
+    await this.validate_page_after_action(page);
+    try {
+      const locator = page.locator(`xpath=${node.xpath}`);
+      const count = await locator.count();
+      if (count === 0) {
+        return null;
+      }
+      return locator;
+    } catch (error) {
+      this.logger.debug(
+        `Failed to locate element via xpath ${node.xpath}: ${(error as Error).message}`
+      );
+      return null;
+    }
+  }
+
+  async _input_text_element_node(
+    node: DOMElementNode,
+    text: string,
+    options: BrowserActionOptions = {}
+  ) {
+    const signal = options.signal ?? null;
+    const clear = options.clear ?? true;
+    this._throwIfAborted(signal);
+    const locator = await this.get_locate_element(node);
+    if (!locator) {
+      throw new Error('Element not found');
+    }
+    const page = await this._withAbort(this.get_current_page(), signal);
+    await this.validate_page_after_action(page, signal);
+    const elementHandle =
+      typeof locator.elementHandle === 'function'
+        ? await this._withAbort(
+            locator.elementHandle({ timeout: 5000 }),
+            signal
+          )
+        : null;
+    if (typeof locator.elementHandle === 'function' && !elementHandle) {
+      throw new Error('Element not found');
+    }
+    let initialDocumentHandle: Awaited<
+      ReturnType<Page['evaluateHandle']>
+    > | null = null;
+    if (elementHandle && typeof page?.evaluateHandle === 'function') {
+      try {
+        initialDocumentHandle = await this._withAbort(
+          page.evaluateHandle(() => document),
+          signal
+        );
+      } catch {
+        // A pinned element still provides the safe fallback when document
+        // identity cannot be captured.
+      }
+    }
+    // A Locator is re-resolved against the current document for every action.
+    // Pin the element whenever Playwright exposes an ElementHandle so a click
+    // that navigates cannot make the subsequent fill target a matching element
+    // on a different origin.
+    let inputTarget = elementHandle ?? locator;
+    let replacementElementHandle: Awaited<
+      ReturnType<Locator['elementHandle']>
+    > = null;
+    try {
+      await this._withAbort(inputTarget.click({ timeout: 5000 }), signal);
+      // Playwright waits for synchronous click-triggered navigation. Validate
+      // it before any text (which may contain credentials) reaches the page.
+      await this.validate_page_after_action(page, signal);
+      if (elementHandle && typeof elementHandle.evaluate === 'function') {
+        let elementIsConnected = false;
+        try {
+          elementIsConnected = await this._withAbort(
+            elementHandle.evaluate((element) => element.isConnected),
+            signal
+          );
+        } catch {
+          // Detached handles and destroyed execution contexts both land here.
+        }
+
+        if (!elementIsConnected) {
+          let sameDocument = false;
+          if (initialDocumentHandle && typeof page?.evaluate === 'function') {
+            try {
+              sameDocument = await this._withAbort(
+                page.evaluate(
+                  (initialDocument) => initialDocument === document,
+                  initialDocumentHandle
+                ),
+                signal
+              );
+            } catch {
+              // A navigation destroys the old document handle. Do not resolve
+              // a locator in the replacement document in that case.
+            }
+          }
+          if (!sameDocument) {
+            throw new Error(
+              'Input element became detached after the page document changed'
+            );
+          }
+
+          replacementElementHandle = await this._withAbort(
+            locator.elementHandle({ timeout: 5000 }),
+            signal
+          );
+          if (!replacementElementHandle) {
+            throw new Error('Element not found after page update');
+          }
+          inputTarget = replacementElementHandle;
+        }
+      }
+      if (clear) {
+        await this._withAbort(
+          inputTarget.fill(text, { timeout: 5000 }),
+          signal
+        );
+      } else {
+        await this._withAbort(
+          inputTarget.type(text, { timeout: 5000 }),
+          signal
+        );
+      }
+    } finally {
+      try {
+        await this.validate_page_after_action(page, signal);
+      } finally {
+        await replacementElementHandle?.dispose().catch(() => undefined);
+        await elementHandle?.dispose().catch(() => undefined);
+        await initialDocumentHandle?.dispose().catch(() => undefined);
+      }
+    }
+  }
+
+  async _click_element_node(
+    node: DOMElementNode,
+    options: BrowserActionOptions = {}
+  ) {
+    const signal = options.signal ?? null;
+    this._throwIfAborted(signal);
+    const locator = await this.get_locate_element(node);
+    if (!locator) {
+      throw new Error('Element not found');
+    }
+    const page = await this._withAbort(this.get_current_page(), signal);
+    await this.validate_page_after_action(page, signal);
+    const performClick = async () => {
+      await this._withAbort(locator.click({ timeout: 5000 }), signal);
+    };
+
+    let result: string | null = null;
+    try {
+      const downloadsDir = this.browser_profile.downloads_path;
+      if (downloadsDir && page?.waitForEvent) {
+        ensurePrivateDirectoryIfCreated(downloadsDir);
+        const downloadPromise = page.waitForEvent('download', {
+          timeout: 5000,
+        });
+        await performClick();
+        try {
+          const download = await this._withAbort(downloadPromise, signal);
+          const downloadGuid = uuid7str();
+          const suggested =
+            typeof download.suggestedFilename === 'function'
+              ? download.suggestedFilename()
+              : 'download';
+          const downloadUrl =
+            typeof download.url === 'function'
+              ? download.url()
+              : (this.currentUrl ?? '');
+          await this._assert_download_url_allowed(download, downloadUrl);
+          await this.event_bus.dispatch(
+            new DownloadStartedEvent({
+              guid: downloadGuid,
+              url: downloadUrl,
+              suggested_filename: suggested,
+              auto_download: false,
+            })
+          );
+          const uniqueFilename = await BrowserSession.get_unique_filename(
+            downloadsDir,
+            suggested
+          );
+          const downloadPath = path.join(downloadsDir, uniqueFilename);
+          if (typeof download.saveAs === 'function') {
+            await download.saveAs(downloadPath);
+            chmodPrivateFileBestEffort(downloadPath);
+          }
+          const stats = fs.existsSync(downloadPath)
+            ? fs.statSync(downloadPath)
+            : null;
+          await this.event_bus.dispatch(
+            new DownloadProgressEvent({
+              guid: downloadGuid,
+              received_bytes: stats?.size ?? 0,
+              total_bytes: stats?.size ?? 0,
+              state: 'completed',
+            })
+          );
+          const fileDownloadedResult = await this.event_bus.dispatch(
+            new FileDownloadedEvent({
+              guid: downloadGuid,
+              url: downloadUrl,
+              path: downloadPath,
+              file_name: uniqueFilename,
+              file_size: stats?.size ?? 0,
+              file_type: path.extname(uniqueFilename).replace('.', '') || null,
+              mime_type: null,
+              auto_download: false,
+            })
+          );
+          if (fileDownloadedResult.handler_results.length === 0) {
+            this.add_downloaded_file(downloadPath);
+          }
+          result = downloadPath;
+        } catch (error) {
+          if (this._isAbortError(error)) {
+            throw error;
+          }
+          if (error instanceof URLNotAllowedError) {
+            throw error;
+          }
+          this.logger.debug(
+            `No download triggered within timeout: ${(error as Error).message}`
+          );
+        }
+      } else {
+        await performClick();
+      }
+    } finally {
+      await this.validate_page_after_action(page, signal);
+      if (
+        page &&
+        this.historyStack[this.historyStack.length - 1] !== this.currentUrl
+      ) {
+        this.historyStack.push(this.currentUrl);
+      }
+    }
+    return result;
+  }
+
+  private async _waitForLoad(
+    page: Page | null,
+    timeout = 5000,
+    signal: AbortSignal | null = null
+  ) {
+    if (!page || typeof page.waitForLoadState !== 'function') {
+      return;
+    }
+    try {
+      await this._withAbort(
+        page.waitForLoadState('domcontentloaded', { timeout }),
+        signal
+      );
+      this._setPageLoadingStatus(page, 'document', null);
+    } catch (error) {
+      if (this._isAbortError(error)) {
+        throw error;
+      }
+      const rawMessage = (error as Error).message || 'Unknown readiness error';
+      const timeoutLike =
+        (error as Error).name === 'TimeoutError' ||
+        /timed?\s*out|timeout/i.test(rawMessage);
+      const duration =
+        timeout >= 1000
+          ? `${Number((timeout / 1000).toFixed(2))}s`
+          : `${Math.max(0, timeout)}ms`;
+      const loadingStatus = timeoutLike
+        ? `Page readiness wait timed out after ${duration} while waiting for DOMContentLoaded. The page may still be usable; use the wait action to allow more time.`
+        : `Page readiness check failed while waiting for DOMContentLoaded: ${boundBrowserStateText(
+            BrowserSession._redact_urls_in_text(rawMessage),
+            MAX_BROWSER_STATE_MESSAGE_CHARS
+          )}`;
+      this._setPageLoadingStatus(page, 'document', loadingStatus);
+      this.logger.debug(`waitForLoadState failed: ${rawMessage}`);
+    }
+  }
+
+  private _isSameDocumentNavigation(
+    previousUrl: string,
+    nextUrl: string
+  ): boolean {
+    if (!previousUrl || !nextUrl || previousUrl === nextUrl) {
+      return false;
+    }
+    try {
+      const previous = new URL(previousUrl);
+      const next = new URL(nextUrl);
+      previous.hash = '';
+      next.hash = '';
+      return previous.href === next.href;
+    } catch {
+      return false;
+    }
+  }
+
+  // ==================== Cookie Management ====================
+
+  /**
+   * Get all cookies from the current browser context
+   */
+  async get_cookies(
+    options: { include_blocked?: boolean } = {}
+  ): Promise<Array<Record<string, any>>> {
+    const cookies = this.browser_context?.cookies
+      ? await this.browser_context.cookies()
+      : [];
+    if (options.include_blocked || !this._has_url_access_restrictions()) {
+      return cookies;
+    }
+    return this._filter_cookies_for_exposure(cookies);
+  }
+
+  /**
+   * Save cookies to a file (deprecated, use save_storage_state instead)
+   * @deprecated Use save_storage_state() instead
+   */
+  async save_cookies(...args: any[]): Promise<void> {
+    return this.save_storage_state(...args);
+  }
+
+  /**
+   * Load cookies from a file (deprecated, use load_storage_state instead)
+   * @deprecated Use load_storage_state() instead
+   */
+  async load_cookies_from_file(...args: any[]): Promise<void> {
+    return this.load_storage_state(...args);
+  }
+
+  /**
+   * Save the current storage state (cookies, localStorage, sessionStorage) to a file
+   */
+  async save_storage_state(filePath?: string): Promise<void> {
+    if (!this.browser_context) {
+      this.logger.warning(
+        'Cannot save storage state: browser context not initialized'
+      );
+      return;
+    }
+
+    const targetPath = filePath || this.browser_profile.cookies_file;
+    if (!targetPath) {
+      return;
+    }
+
+    try {
+      const resolvedPath = path.resolve(targetPath);
+      const dirPath = path.dirname(resolvedPath);
+
+      // Create directory if it doesn't exist
+      ensurePrivateDirectoryIfCreated(dirPath);
+
+      // Get storage state from browser context
+      const rawStorageState = await this.browser_context.storageState();
+      const storageState =
+        this._sanitize_storage_state_for_save(rawStorageState);
+      const serializedStorageState = serializeBoundedStorageState(
+        storageState,
+        2
+      );
+
+      writeBoundedStorageStateFile(resolvedPath, serializedStorageState);
+
+      const cookieCount = storageState.cookies?.length || 0;
+      this.logger.info(
+        `🍪 Saved ${cookieCount} cookies to ${path.basename(resolvedPath)}`
+      );
+    } catch (error) {
+      this.logger.warning(
+        `❌ Failed to save storage state: ${(error as Error).message}`
+      );
+    }
+  }
+
+  /**
+   * Load storage state (cookies, localStorage, sessionStorage) from a file
+   */
+  async load_storage_state(filePath?: string): Promise<void> {
+    const targetPath = filePath || this.browser_profile.cookies_file;
+    if (!targetPath) {
+      return;
+    }
+
+    try {
+      const resolvedPath = path.resolve(targetPath);
+
+      if (!fs.existsSync(resolvedPath)) {
+        this.logger.warning(`Storage state file not found: ${resolvedPath}`);
+        return;
+      }
+
+      const storageState = readBoundedStorageStateFile(resolvedPath);
+
+      if (this.browser_context?.addCookies) {
+        // Add cookies to context
+        if (storageState.cookies && Array.isArray(storageState.cookies)) {
+          const allowedCookies = this._filter_storage_state_cookies(
+            storageState.cookies
+          );
+          if (allowedCookies.length > 0) {
+            await this.browser_context.addCookies(allowedCookies);
+          }
+          this.logger.info(
+            `🍪 Loaded ${allowedCookies.length} cookies from ${path.basename(resolvedPath)}`
+          );
+        }
+      }
+
+      if (Array.isArray(storageState.origins)) {
+        await this._apply_storage_state_origins(storageState.origins);
+      }
+    } catch (error) {
+      this.logger.warning(
+        `❌ Failed to load storage state: ${(error as Error).message}`
+      );
+    }
+  }
+
+  private async _apply_storage_state_origins(origins: unknown[]) {
+    const browserContext = this.browser_context as {
+      newPage?: () => Promise<{
+        goto?: (
+          url: string,
+          options?: Record<string, unknown>
+        ) => Promise<unknown>;
+        url?: () => string;
+        evaluate?: (
+          fn: (payload: {
+            localStorageEntries: Array<{ name: string; value: string }>;
+            sessionStorageEntries: Array<{ name: string; value: string }>;
+          }) => void,
+          arg: {
+            localStorageEntries: Array<{ name: string; value: string }>;
+            sessionStorageEntries: Array<{ name: string; value: string }>;
+          }
+        ) => Promise<unknown>;
+        close?: () => Promise<unknown>;
+      }>;
+    } | null;
+
+    if (!browserContext?.newPage) {
+      return;
+    }
+
+    for (const originState of origins) {
+      const origin =
+        originState &&
+        typeof originState === 'object' &&
+        'origin' in originState &&
+        typeof (originState as any).origin === 'string'
+          ? (originState as any).origin.trim()
+          : '';
+      if (!origin || !/^https?:\/\//i.test(origin)) {
+        continue;
+      }
+
+      const denialReason = this._get_url_access_denial_reason(origin);
+      if (denialReason) {
+        this.logger.warning(
+          `Skipping storage origin ${BrowserSession._redact_url_for_logging(
+            origin
+          )}: ${denialReason}`
+        );
+        continue;
+      }
+
+      const localStorageEntries = this._normalize_storage_entries(
+        (originState as any).localStorage
+      );
+      const sessionStorageEntries = this._normalize_storage_entries(
+        (originState as any).sessionStorage
+      );
+      if (
+        localStorageEntries.length === 0 &&
+        sessionStorageEntries.length === 0
+      ) {
+        continue;
+      }
+
+      let page: Awaited<
+        ReturnType<NonNullable<typeof browserContext.newPage>>
+      > | null = null;
+      try {
+        page = await browserContext.newPage();
+        await page.goto?.(origin, {
+          waitUntil: 'domcontentloaded',
+          timeout: 5_000,
+        });
+        const finalUrl = typeof page.url === 'function' ? page.url() : origin;
+        const finalDenialReason = this._get_url_access_denial_reason(finalUrl);
+        if (finalDenialReason) {
+          this.logger.warning(
+            `Skipping storage origin ${BrowserSession._redact_url_for_logging(
+              origin
+            )} after redirect to blocked URL: ${finalDenialReason}`
+          );
+          try {
+            await page.goto?.('about:blank', {
+              waitUntil: 'load',
+              timeout: 5_000,
+            });
+          } catch {
+            // The temporary page is closed below; resetting first is best effort.
+          }
+          continue;
+        }
+        if (!BrowserSession._same_origin(origin, finalUrl)) {
+          this.logger.warning(
+            `Skipping storage origin ${BrowserSession._redact_url_for_logging(
+              origin
+            )} after redirect to a different origin`
+          );
+          try {
+            await page.goto?.('about:blank', {
+              waitUntil: 'load',
+              timeout: 5_000,
+            });
+          } catch {
+            // The temporary page is closed below; resetting first is best effort.
+          }
+          continue;
+        }
+        await page.evaluate?.(
+          (payload) => {
+            for (const entry of payload.localStorageEntries) {
+              window.localStorage.setItem(entry.name, entry.value);
+            }
+            for (const entry of payload.sessionStorageEntries) {
+              window.sessionStorage.setItem(entry.name, entry.value);
+            }
+          },
+          {
+            localStorageEntries,
+            sessionStorageEntries,
+          }
+        );
+      } catch (error) {
+        this.logger.debug(
+          `Failed to apply origin storage for ${BrowserSession._redact_url_for_logging(
+            origin
+          )}: ${(error as Error).message}`
+        );
+      } finally {
+        try {
+          await page?.close?.();
+        } catch {
+          // Ignore cleanup errors.
+        }
+      }
+    }
+  }
+
+  private _normalize_storage_entries(entries: unknown) {
+    if (!Array.isArray(entries)) {
+      return [] as Array<{ name: string; value: string }>;
+    }
+
+    const normalized: Array<{ name: string; value: string }> = [];
+    for (const entry of entries) {
+      const name =
+        entry && typeof entry === 'object' && 'name' in entry
+          ? String((entry as any).name ?? '')
+          : '';
+      if (!name) {
+        continue;
+      }
+      const value =
+        entry && typeof entry === 'object' && 'value' in entry
+          ? String((entry as any).value ?? '')
+          : '';
+      normalized.push({ name, value });
+    }
+    return normalized;
+  }
+
+  private _sanitize_storage_state_for_save(storageState: unknown) {
+    if (!this._has_url_access_restrictions()) {
+      return storageState as any;
+    }
+
+    const normalized =
+      storageState && typeof storageState === 'object'
+        ? { ...(storageState as Record<string, unknown>) }
+        : {};
+
+    const cookies = Array.isArray(normalized.cookies)
+      ? this._filter_storage_state_cookies(normalized.cookies)
+      : [];
+    const origins = Array.isArray(normalized.origins)
+      ? normalized.origins.filter((originState) => {
+          const origin =
+            originState &&
+            typeof originState === 'object' &&
+            'origin' in originState &&
+            typeof (originState as any).origin === 'string'
+              ? (originState as any).origin.trim()
+              : '';
+          const denialReason = origin
+            ? this._get_url_access_denial_reason(origin)
+            : 'invalid_url';
+          if (!denialReason) {
+            return true;
+          }
+          this.logger.warning(
+            `Skipping saved storage origin ${
+              origin
+                ? BrowserSession._redact_url_for_logging(origin)
+                : '<invalid>'
+            }: ${denialReason}`
+          );
+          return false;
+        })
+      : [];
+
+    return {
+      ...normalized,
+      cookies,
+      origins,
+    };
+  }
+
+  private _filter_storage_state_cookies(cookies: unknown[]): any[] {
+    return cookies.filter((cookie) => {
+      const denialReason = this._get_cookie_access_denial_reason(cookie);
+      if (!denialReason) {
+        return true;
+      }
+      const cookieName =
+        cookie && typeof cookie === 'object' && 'name' in cookie
+          ? String((cookie as any).name ?? '')
+          : '';
+      this.logger.warning(
+        `Skipping storage cookie ${cookieName || '<unnamed>'}: ${denialReason}`
+      );
+      return false;
+    });
+  }
+
+  private _filter_cookies_for_exposure(cookies: unknown[]): any[] {
+    return cookies.filter((cookie) => {
+      const denialReason = this._get_cookie_access_denial_reason(cookie);
+      if (!denialReason) {
+        return true;
+      }
+      const cookieName =
+        cookie && typeof cookie === 'object' && 'name' in cookie
+          ? String((cookie as any).name ?? '')
+          : '';
+      this.logger.debug(
+        `Skipping exposed cookie ${cookieName || '<unnamed>'}: ${denialReason}`
+      );
+      return false;
+    });
+  }
+
+  private _get_cookie_access_denial_reason(cookie: unknown): string | null {
+    if (!cookie || typeof cookie !== 'object') {
+      return null;
+    }
+
+    const cookieLike = cookie as {
+      url?: unknown;
+      domain?: unknown;
+      secure?: unknown;
+    };
+    const explicitUrl =
+      typeof cookieLike.url === 'string' ? cookieLike.url.trim() : '';
+    if (explicitUrl) {
+      return this._get_url_access_denial_reason(explicitUrl);
+    }
+
+    const rawDomain =
+      typeof cookieLike.domain === 'string' ? cookieLike.domain.trim() : '';
+    const host = rawDomain.replace(/^\./, '');
+    if (!host) {
+      return null;
+    }
+
+    const protocols =
+      cookieLike.secure === true ? ['https:'] : ['https:', 'http:'];
+    let lastReason: string | null = null;
+    for (const protocol of protocols) {
+      const reason = this._get_url_access_denial_reason(`${protocol}//${host}`);
+      if (!reason) {
+        return null;
+      }
+      if (reason === 'in_prohibited_domains') {
+        return reason;
+      }
+      lastReason = reason;
+    }
+    return lastReason;
+  }
+
+  // ==================== JavaScript Execution ====================
+
+  /**
+   * Execute JavaScript in the current page context
+   */
+  async execute_javascript(script: string): Promise<any> {
+    const page = await this.get_current_page();
+    if (!page) {
+      throw new Error('No page available to execute JavaScript');
+    }
+    await this.validate_page_after_action(page);
+    try {
+      return await page.evaluate(script);
+    } finally {
+      await this._waitForLoad(page, 5000);
+      await this._assert_page_url_allowed_or_rollback(page);
+      await this._syncCurrentTabFromPage(page);
+      this.cachedBrowserState = null;
+    }
+  }
+
+  async validate_page_after_action(
+    page: Page | null,
+    signal: AbortSignal | null = null
+  ): Promise<void> {
+    await this._waitForLoad(page, 5000, signal);
+    if (page) {
+      await this._assert_page_url_allowed_or_rollback(page);
+      await this._syncCurrentTabFromPage(page);
+    }
+    this.cachedBrowserState = null;
+  }
+
+  // ==================== Page Information ====================
+
+  /**
+   * Get comprehensive page information (size, scroll position, etc.)
+   */
+  async get_page_info(page?: Page): Promise<any> {
+    const targetPage = page || (await this.get_current_page());
+    if (!targetPage) {
+      return null;
+    }
+
+    await this.validate_page_after_action(targetPage);
+    try {
+      const pageData = await targetPage.evaluate(() => {
+        return {
+          // Current viewport dimensions
+          viewport_width: window.innerWidth,
+          viewport_height: window.innerHeight,
+          device_pixel_ratio: window.devicePixelRatio,
+
+          // Total page dimensions
+          page_width: Math.max(
+            document.documentElement.scrollWidth,
+            document.body.scrollWidth || 0
+          ),
+          page_height: Math.max(
+            document.documentElement.scrollHeight,
+            document.body.scrollHeight || 0
+          ),
+
+          // Current scroll position
+          scroll_x:
+            window.scrollX ||
+            window.pageXOffset ||
+            document.documentElement.scrollLeft ||
+            0,
+          scroll_y:
+            window.scrollY ||
+            window.pageYOffset ||
+            document.documentElement.scrollTop ||
+            0,
+        };
+      });
+
+      // Calculate derived values
+      const viewport_width = Math.floor(pageData.viewport_width);
+      const viewport_height = Math.floor(pageData.viewport_height);
+      const device_pixel_ratio = Number(pageData.device_pixel_ratio);
+      const page_width = Math.floor(pageData.page_width);
+      const page_height = Math.floor(pageData.page_height);
+      const scroll_x = Math.floor(pageData.scroll_x);
+      const scroll_y = Math.floor(pageData.scroll_y);
+
+      // Calculate scroll information
+      const pixels_above = scroll_y;
+      const pixels_below = Math.max(
+        0,
+        page_height - (scroll_y + viewport_height)
+      );
+      const pixels_left = scroll_x;
+      const pixels_right = Math.max(
+        0,
+        page_width - (scroll_x + viewport_width)
+      );
+
+      return {
+        viewport_width,
+        viewport_height,
+        device_pixel_ratio:
+          Number.isFinite(device_pixel_ratio) && device_pixel_ratio > 0
+            ? device_pixel_ratio
+            : 1,
+        page_width,
+        page_height,
+        scroll_x,
+        scroll_y,
+        pixels_above,
+        pixels_below,
+        pixels_left,
+        pixels_right,
+      };
+    } finally {
+      await this.validate_page_after_action(targetPage);
+    }
+  }
+
+  /**
+   * Get the HTML content of the current page
+   */
+  async get_page_html(): Promise<string> {
+    const page = await this.get_current_page();
+    if (!page) {
+      return '';
+    }
+    await this.validate_page_after_action(page);
+    try {
+      const result = await extractBoundedPageHtml(
+        page,
+        MAX_MAIN_PAGE_HTML_CHARS
+      );
+      if (result.sourceUrl && !this._is_url_allowed(result.sourceUrl)) {
+        throw new URLNotAllowedError(
+          `Page HTML source is blocked by browser domain policy: ${this._get_url_access_denial_reason(result.sourceUrl)}`
+        );
+      }
+      return result.html;
+    } finally {
+      await this.validate_page_after_action(page);
+    }
+  }
+
+  /**
+   * Get a debug view of the page structure including iframes
+   */
+  async get_page_structure(): Promise<string> {
+    const page = await this.get_current_page();
+    if (!page) {
+      return '';
+    }
+    await this.validate_page_after_action(page);
+
+    const debug_script = `(() => {
+			function getPageStructure(element = document, depth = 0, maxDepth = 10) {
+				if (depth >= maxDepth) return '';
+
+				const indent = '  '.repeat(depth);
+				let structure = '';
+
+				// Skip certain elements that clutter the output
+				const skipTags = new Set(['script', 'style', 'link', 'meta', 'noscript']);
+
+				// Add current element info if it's not the document
+				if (element !== document) {
+					const tagName = element.tagName.toLowerCase();
+
+					// Skip uninteresting elements
+					if (skipTags.has(tagName)) return '';
+
+					const id = element.id ? \`#\${element.id}\` : '';
+					const classes = element.className && typeof element.className === 'string' ?
+						\`.\${element.className.split(' ').filter(c => c).join('.')}\` : '';
+
+					// Get additional useful attributes
+					const attrs = [];
+					if (element.getAttribute('role')) attrs.push(\`role="\${element.getAttribute('role')}"\`);
+					if (element.getAttribute('aria-label')) attrs.push(\`aria-label="\${element.getAttribute('aria-label')}"\`);
+					if (element.getAttribute('type')) attrs.push(\`type="\${element.getAttribute('type')}"\`);
+					if (element.getAttribute('name')) attrs.push(\`name="\${element.getAttribute('name')}"\`);
+					if (element.getAttribute('src')) {
+						const src = element.getAttribute('src');
+						attrs.push(\`src="\${src.substring(0, 50)}\${src.length > 50 ? '...' : ''}"\`);
+					}
+
+					// Add element info
+					structure += \`\${indent}\${tagName}\${id}\${classes}\${attrs.length ? ' [' + attrs.join(', ') + ']' : ''}\\n\`;
+
+					// Handle iframes specially
+					if (tagName === 'iframe') {
+						try {
+							const iframeDoc = element.contentDocument || element.contentWindow?.document;
+							if (iframeDoc) {
+								structure += \`\${indent}  [IFRAME CONTENT]:\\n\`;
+								structure += getPageStructure(iframeDoc, depth + 2, maxDepth);
+							} else {
+								structure += \`\${indent}  [CROSS-ORIGIN IFRAME - Cannot access]\\n\`;
+							}
+						} catch (e) {
+							structure += \`\${indent}  [IFRAME - Access denied]\\n\`;
+						}
+						return structure;
+					}
+				}
+
+				// Process children
+				const children = element.children || element.documentElement?.children || [];
+				for (let i = 0; i < children.length; i++) {
+					structure += getPageStructure(children[i], depth + 1, maxDepth);
+				}
+
+				return structure;
+			}
+
+			return getPageStructure();
+		})()`;
+
+    try {
+      return await page.evaluate(debug_script);
+    } finally {
+      await this.validate_page_after_action(page);
+    }
+  }
+
+  // ==================== Navigation & History ====================
+
+  /**
+   * Navigate forward in browser history
+   */
+  async go_forward(): Promise<void> {
+    const page = await this.get_current_page();
+    if (!page?.goForward) {
+      return;
+    }
+    await this.validate_page_after_action(page);
+    const previousUrl = page.url();
+    try {
+      this._resetPageLoadingStatus(page);
+      await page.goForward({ timeout: 10000, waitUntil: 'load' });
+      const navigatedUrl = page.url();
+      if (!this._isSameDocumentNavigation(previousUrl, navigatedUrl)) {
+        await this._waitForStableNetwork(page);
+      }
+    } catch (error) {
+      if (error instanceof URLNotAllowedError) {
+        throw error;
+      }
+      this.logger.debug(
+        `⏭️ Error during go_forward: ${(error as Error).message}`
+      );
+      // Verify page is still usable after navigation error
+      if ((error as Error).message.toLowerCase().includes('timeout')) {
+        const page = await this.get_current_page();
+        try {
+          await page?.evaluate('1');
+        } catch (evalError) {
+          this.logger.error(
+            `❌ Page crashed after go_forward timeout: ${(evalError as Error).message}`
+          );
+        }
+      }
+    } finally {
+      await this.validate_page_after_action(page);
+    }
+  }
+
+  /**
+   * Refresh the current page
+   */
+  async refresh(): Promise<void> {
+    const page = await this.get_current_page();
+    if (!page?.reload) {
+      return;
+    }
+    await this.validate_page_after_action(page);
+    try {
+      this._resetPageLoadingStatus(page);
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      await this._waitForStableNetwork(page);
+    } catch (error) {
+      if (error instanceof URLNotAllowedError) {
+        throw error;
+      }
+      this.logger.debug(`🔄 Error during refresh: ${(error as Error).message}`);
+    } finally {
+      await this.validate_page_after_action(page);
+    }
+  }
+
+  // ==================== Element Waiting ====================
+
+  /**
+   * Wait for an element to appear on the page
+   */
+  async wait_for_element(
+    selector: string,
+    timeout: number = 10000
+  ): Promise<void> {
+    const boundedTimeout = requireBrowserTimeoutMs(
+      timeout,
+      'element wait timeout'
+    );
+    const page = await this.get_current_page();
+    if (!page) {
+      throw new Error('No page available');
+    }
+    await this.validate_page_after_action(page);
+    try {
+      await page.waitForSelector(selector, {
+        state: 'visible',
+        timeout: boundedTimeout,
+      });
+    } finally {
+      await this.validate_page_after_action(page);
+    }
+  }
+
+  // ==================== Screenshots ====================
+
+  /**
+   * Take a screenshot of the current page.
+   * @param full_page Whether to capture the full scrollable page
+   * @param clip Optional clip region for partial screenshots
+   * @returns Base64 encoded PNG screenshot
+   */
+  async take_screenshot(
+    full_page: boolean = false,
+    clip: {
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+    } | null = null
+  ): Promise<string | null> {
+    const page = await this.get_current_page();
+    if (!page) {
+      throw new Error('No page available for screenshot');
+    }
+    await this.validate_page_after_action(page);
+
+    if (!this.browser_context) {
+      throw new Error('Browser context is not set');
+    }
+
+    // Check if it's a new tab page
+    const url = page.url();
+    const logUrl = BrowserSession._redact_url_for_logging(url);
+    if (
+      url === 'about:blank' ||
+      url === 'chrome://newtab/' ||
+      url === 'edge://newtab/'
+    ) {
+      this.logger.warning(`▫️ Skipping screenshot of empty page: ${logUrl}`);
+      // Return a 4px placeholder
+      return 'iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAYAAACp8Z5+AAAAD0lEQVQIHWP8//8/AxYMACgtBP9g8jqYAAAAAElFTkSuQmCC';
+    }
+
+    // Bring page to front before rendering
+    try {
+      await page.bringToFront();
+    } catch (error) {
+      // Ignore errors
+    }
+
+    // Take screenshot using CDP for better performance
+    let cdp_session: any = null;
+    try {
+      this.logger.debug(
+        `📸 Taking ${full_page ? 'full-page' : 'viewport'} PNG screenshot via CDP: ${logUrl}`
+      );
+
+      // Create CDP session for the screenshot
+      cdp_session = await this.get_or_create_cdp_session(page);
+
+      // Capture screenshot via CDP
+      const screenshotParams: Record<string, unknown> = {
+        captureBeyondViewport: full_page,
+        fromSurface: true,
+        format: 'png',
+      };
+      if (clip) {
+        screenshotParams.clip = {
+          x: clip.x,
+          y: clip.y,
+          width: clip.width,
+          height: clip.height,
+          scale: 1,
+        };
+      }
+
+      const screenshot_response = await cdp_session.send(
+        'Page.captureScreenshot',
+        screenshotParams
+      );
+
+      const screenshot_b64 = screenshot_response.data;
+      if (!screenshot_b64) {
+        throw new Error(
+          `CDP returned empty screenshot data for page ${logUrl}`
+        );
+      }
+
+      return screenshot_b64;
+    } catch (error) {
+      const error_str = (error as Error).message || String(error);
+      if (error_str.toLowerCase().includes('timeout')) {
+        this.logger.warning(
+          `⏱️ Screenshot timed out on page ${logUrl}: ${error_str}`
+        );
+      } else {
+        this.logger.error(
+          `❌ Screenshot failed on page ${logUrl}: ${error_str}`
+        );
+      }
+      throw error;
+    } finally {
+      if (cdp_session) {
+        try {
+          await cdp_session.detach();
+        } catch (error) {
+          // Ignore detach errors
+        }
+      }
+      await this.validate_page_after_action(page);
+    }
+  }
+
+  // ==================== Event Listeners ====================
+
+  /**
+   * Add a request event listener to the current page
+   */
+  async on_request(
+    callback: (request: any) => void | Promise<void>
+  ): Promise<void> {
+    const page = await this.get_current_page();
+    if (page && typeof page.on === 'function') {
+      page.on('request', callback);
+    }
+  }
+
+  /**
+   * Add a response event listener to the current page
+   */
+  async on_response(
+    callback: (response: any) => void | Promise<void>
+  ): Promise<void> {
+    const page = await this.get_current_page();
+    if (page && typeof page.on === 'function') {
+      page.on('response', callback);
+    }
+  }
+
+  /**
+   * Remove a request event listener from the current page
+   */
+  async off_request(
+    callback: (request: any) => void | Promise<void>
+  ): Promise<void> {
+    const page = await this.get_current_page();
+    if (page && typeof page.off === 'function') {
+      page.off('request', callback);
+    }
+  }
+
+  /**
+   * Remove a response event listener from the current page
+   */
+  async off_response(
+    callback: (response: any) => void | Promise<void>
+  ): Promise<void> {
+    const page = await this.get_current_page();
+    if (page && typeof page.off === 'function') {
+      page.off('response', callback);
+    }
+  }
+
+  // ==================== P2 Additional Functions ====================
+
+  /**
+   * Get information about all open tabs
+   * @returns Array of tab information including page_id, tab_id, url, and title
+   */
+  async get_tabs_info(): Promise<
+    Array<{ page_id: number; tab_id: string; url: string; title: string }>
+  > {
+    if (!this.browser_context) {
+      return [];
+    }
+    this._syncTabsWithBrowserPages();
+
+    const tabs_info: Array<{
+      page_id: number;
+      tab_id: string;
+      url: string;
+      title: string;
+    }> = [];
+    for (const tab of this._tabs.slice(0, MAX_BROWSER_STATE_TABS)) {
+      const page_id = tab.page_id;
+      const page = this.tabPages.get(page_id) ?? null;
+      const tab_id = tab.tab_id || this._formatTabId(page_id);
+      if (!tab.tab_id) {
+        tab.tab_id = tab_id;
+      }
+      this._attachDialogHandler(page);
+
+      let currentUrl = tab.url;
+      if (page?.url) {
+        try {
+          currentUrl = normalize_url(page.url());
+        } catch {
+          // Keep tab url fallback when page url is unavailable.
+        }
+      }
+
+      const exposedTab = this._sanitize_tab_for_exposure({
+        page_id,
+        tab_id,
+        url: currentUrl,
+        title: tab.title || currentUrl,
+      });
+      const accessDenied =
+        this._has_url_access_restrictions() &&
+        this._get_url_access_denial_reason(currentUrl) !== null;
+      if (accessDenied) {
+        tabs_info.push(exposedTab);
+        continue;
+      }
+
+      // Skip chrome:// pages and new tab pages
+      const isNewTab =
+        currentUrl === 'about:blank' ||
+        currentUrl.startsWith('chrome://newtab');
+      if (isNewTab || currentUrl.startsWith('chrome://')) {
+        if (isNewTab) {
+          tabs_info.push({
+            page_id,
+            tab_id,
+            url: currentUrl,
+            title: 'ignore this tab and do not use it',
+          });
+        } else {
+          tabs_info.push({
+            page_id,
+            tab_id,
+            url: currentUrl,
+            title: currentUrl,
+          });
+        }
+        continue;
+      }
+
+      // Normal pages - try to get title with timeout
+      try {
+        if (!page?.title) {
+          throw new Error('page_title_unavailable');
+        }
+        const titlePromise = readBoundedPageTitle(page);
+        const timeoutPromise = new Promise<string>((_, reject) => {
+          setTimeout(() => reject(new Error('timeout')), 2000);
+        });
+
+        const title = await Promise.race([titlePromise, timeoutPromise]);
+        tabs_info.push(
+          this._sanitize_tab_for_exposure({
+            page_id,
+            tab_id,
+            url: currentUrl,
+            title,
+          })
+        );
+      } catch (error) {
+        this.logger.debug(
+          `⚠️ Failed to get tab info for tab #${page_id}: ${BrowserSession._redact_url_for_logging(
+            currentUrl
+          )} (using fallback title)`
+        );
+
+        if (isNewTab) {
+          tabs_info.push({
+            page_id,
+            tab_id,
+            url: currentUrl,
+            title: 'ignore this tab and do not use it',
+          });
+        } else {
+          tabs_info.push({
+            page_id,
+            tab_id,
+            url: currentUrl,
+            title: tab.title || currentUrl,
+          });
+        }
+      }
+    }
+
+    return tabs_info
+      .slice(0, MAX_BROWSER_STATE_TABS)
+      .map((tab) => this._sanitize_tab_for_exposure(tab));
+  }
+
+  /**
+   * Check if a page is responsive by trying to evaluate simple JavaScript
+   * @param page - The page to check
+   * @param timeout - Timeout in seconds (default: 5)
+   * @returns True if page is responsive, false otherwise
+   */
+  async _is_page_responsive(
+    page: any,
+    timeout: number = 5.0
+  ): Promise<boolean> {
+    try {
+      const boundedTimeout = requireBrowserTimeoutSeconds(
+        timeout,
+        'page responsiveness timeout'
+      );
+      const evalPromise = page.evaluate('1');
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error('timeout')), boundedTimeout * 1000);
+      });
+
+      await Promise.race([evalPromise, timeoutPromise]);
+      return true;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  /**
+   * Get scroll information for the current page
+   * @returns Object with scroll position and page dimensions
+   */
+  async get_scroll_info(): Promise<{
+    scroll_x: number;
+    scroll_y: number;
+    page_width: number;
+    page_height: number;
+    viewport_width: number;
+    viewport_height: number;
+  }> {
+    const page = await this.get_current_page();
+    if (!page) {
+      return {
+        scroll_x: 0,
+        scroll_y: 0,
+        page_width: 0,
+        page_height: 0,
+        viewport_width: 0,
+        viewport_height: 0,
+      };
+    }
+
+    await this.validate_page_after_action(page);
+    try {
+      return await page.evaluate(() => {
+        return {
+          scroll_x:
+            window.scrollX ||
+            window.pageXOffset ||
+            document.documentElement.scrollLeft ||
+            0,
+          scroll_y:
+            window.scrollY ||
+            window.pageYOffset ||
+            document.documentElement.scrollTop ||
+            0,
+          page_width: Math.max(
+            document.documentElement.scrollWidth,
+            document.body.scrollWidth || 0
+          ),
+          page_height: Math.max(
+            document.documentElement.scrollHeight,
+            document.body.scrollHeight || 0
+          ),
+          viewport_width: window.innerWidth,
+          viewport_height: window.innerHeight,
+        };
+      });
+    } finally {
+      await this.validate_page_after_action(page);
+    }
+  }
+
+  /**
+   * Get a summary of the current browser state
+   * @param cache_clickable_elements_hashes - Cache clickable element hashes to detect new elements
+   * @param include_screenshot - Include screenshot in state summary
+   * @returns BrowserStateSummary with current page state
+   */
+  async get_state_summary(
+    cache_clickable_elements_hashes: boolean = true,
+    include_screenshot: boolean = true,
+    include_recent_events: boolean = false
+  ): Promise<BrowserStateSummary> {
+    this.logger.debug('🔄 Starting get_state_summary...');
+
+    const updated_state = await this._get_updated_state(
+      -1,
+      include_screenshot,
+      include_recent_events
+    );
+
+    // Implement clickable element hash caching to detect new elements
+    if (cache_clickable_elements_hashes) {
+      const page = await this.get_current_page();
+      if (page) {
+        const currentUrl = page.url();
+        const currentHashes = this._computeElementHashes(
+          updated_state.selector_map
+        );
+
+        // Mark new elements if we have cached hashes for this URL
+        if (
+          this._cachedClickableElementHashes &&
+          this._cachedClickableElementHashes.url === currentUrl
+        ) {
+          this._markNewElements(
+            updated_state.selector_map,
+            this._cachedClickableElementHashes.hashes
+          );
+        }
+
+        // Update cache with current hashes
+        this._cachedClickableElementHashes = {
+          url: currentUrl,
+          hashes: currentHashes,
+        };
+      }
+    }
+
+    this.cachedBrowserState = updated_state;
+    return this.cachedBrowserState;
+  }
+
+  /**
+   * Get minimal state summary without DOM processing, but with screenshot
+   * Used when page is in error state or unresponsive
+   */
+  async get_minimal_state_summary(
+    include_recent_events: boolean = false
+  ): Promise<BrowserStateSummary> {
+    try {
+      const page = await this.get_current_page();
+      if (page) {
+        await this._assert_page_url_allowed_or_rollback(page);
+        await this._syncCurrentTabFromPage(page);
+      }
+      const url = page ? page.url() : 'unknown';
+
+      // Try to get title safely
+      let title = 'Page Load Error';
+      try {
+        if (page) {
+          const titlePromise = readBoundedPageTitle(page);
+          const timeoutPromise = new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('timeout')), 2000)
+          );
+          title = await Promise.race([titlePromise, timeoutPromise]);
+        }
+      } catch (error) {
+        // Keep default title
+      }
+
+      // Try to get tabs info safely
+      let tabs_info: TabInfo[] = [];
+      try {
+        const tabsPromise = this.get_tabs_info();
+        const timeoutPromise = new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('timeout')), 2000)
+        );
+        tabs_info = await Promise.race([tabsPromise, timeoutPromise]);
+      } catch (error) {
+        // Keep empty tabs
+      }
+
+      // Create minimal DOM element for error state
+      const minimal_element_tree = new DOMElementNode(
+        true,
+        null,
+        'body',
+        '/body',
+        {},
+        []
+      );
+
+      // Try to get screenshot
+      let screenshot_b64: string | null = null;
+      try {
+        screenshot_b64 = await this.take_screenshot();
+      } catch (error) {
+        this.logger.debug(
+          `Screenshot failed in minimal state: ${(error as Error).message}`
+        );
+      }
+
+      // Use default viewport dimensions
+      const viewport = this.browser_profile.viewport || {
+        width: 1280,
+        height: 720,
+      };
+
+      const dom_state = new DOMState(minimal_element_tree, {});
+      this._original_viewport_size = [viewport.width, viewport.height];
+      return new BrowserStateSummary(dom_state, {
+        url,
+        title,
+        tabs: tabs_info,
+        screenshot: screenshot_b64,
+        page_info: {
+          viewport_width: viewport.width,
+          viewport_height: viewport.height,
+          page_width: viewport.width,
+          page_height: viewport.height,
+          scroll_x: 0,
+          scroll_y: 0,
+          pixels_above: 0,
+          pixels_below: 0,
+          pixels_left: 0,
+          pixels_right: 0,
+        },
+        pixels_above: 0,
+        pixels_below: 0,
+        browser_errors: ['Page in error state - minimal navigation available'],
+        is_pdf_viewer: false,
+        loading_status: this.currentPageLoadingStatus,
+        recent_events: include_recent_events
+          ? this._getRecentEventsSummary()
+          : null,
+        pending_network_requests: [],
+        pagination_buttons: [],
+        closed_popup_messages: this._getClosedPopupMessagesSnapshot(),
+      });
+    } catch (error) {
+      this.logger.error(
+        `Failed to get minimal state summary: ${(error as Error).message}`
+      );
+      throw error;
+    }
+  }
+
+  /**
+   * Internal method to get updated browser state with DOM processing
+   * @param focus_element - Element index to focus on (default: -1)
+   * @param include_screenshot - Whether to include screenshot
+   */
+  private async _get_updated_state(
+    focus_element: number = -1,
+    include_screenshot: boolean = true,
+    include_recent_events: boolean = false
+  ): Promise<BrowserStateSummary> {
+    const page = await this.get_current_page();
+    if (!page) {
+      throw new Error('No current page available');
+    }
+
+    await this.validate_page_after_action(page);
+    const page_url = page.url();
+    const logPageUrl = BrowserSession._redact_url_for_logging(page_url);
+
+    // Check for new tab or chrome:// pages - fast path
+    const is_empty_page =
+      this._is_new_tab_page(page_url) || page_url.startsWith('chrome://');
+
+    if (is_empty_page) {
+      this.logger.debug(`⚡ Fast path for empty page: ${logPageUrl}`);
+
+      // Create minimal DOM state
+      const minimal_element_tree = new DOMElementNode(
+        false,
+        null,
+        'body',
+        '',
+        {},
+        []
+      );
+
+      const tabs_info = await this.get_tabs_info();
+      const viewport = this.browser_profile.viewport || {
+        width: 1280,
+        height: 720,
+      };
+
+      const dom_state = new DOMState(minimal_element_tree, {});
+      this._original_viewport_size = [viewport.width, viewport.height];
+      return new BrowserStateSummary(dom_state, {
+        url: page_url,
+        title: this._is_new_tab_page(page_url) ? 'New Tab' : 'Chrome Page',
+        tabs: tabs_info,
+        screenshot: null,
+        page_info: {
+          viewport_width: viewport.width,
+          viewport_height: viewport.height,
+          page_width: viewport.width,
+          page_height: viewport.height,
+          scroll_x: 0,
+          scroll_y: 0,
+          pixels_above: 0,
+          pixels_below: 0,
+          pixels_left: 0,
+          pixels_right: 0,
+        },
+        pixels_above: 0,
+        pixels_below: 0,
+        browser_errors: [],
+        is_pdf_viewer: false,
+        loading_status: this.currentPageLoadingStatus,
+        recent_events: include_recent_events
+          ? this._getRecentEventsSummary()
+          : null,
+        pending_network_requests: [],
+        pagination_buttons: [],
+        closed_popup_messages: this._getClosedPopupMessagesSnapshot(),
+      });
+    }
+
+    // Normal path for regular pages
+    this.logger.debug('🧹 Removing highlights...');
+    try {
+      await this.remove_highlights();
+    } catch (error) {
+      if (error instanceof URLNotAllowedError) {
+        throw error;
+      }
+      this.logger.debug('Timeout removing highlights');
+    } finally {
+      await this.validate_page_after_action(page);
+    }
+
+    // Check for PDF and auto-download if needed
+    try {
+      const pdf_path = await this._auto_download_pdf_if_needed(page);
+      if (pdf_path) {
+        this.logger.info(`📄 PDF auto-downloaded: ${pdf_path}`);
+      }
+    } catch (error) {
+      if (error instanceof URLNotAllowedError) {
+        throw error;
+      }
+      this.logger.debug(
+        `PDF auto-download check failed: ${(error as Error).message}`
+      );
+    } finally {
+      await this.validate_page_after_action(page);
+    }
+
+    // DOM processing
+    this.logger.debug('🌳 Starting DOM processing...');
+    const dom_service = new DomService(page, this.logger);
+
+    let content: DOMState;
+    try {
+      const domPromise = dom_service.get_clickable_elements(
+        this.browser_profile.highlight_elements,
+        focus_element,
+        this.browser_profile.viewport_expansion
+      );
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('DOM processing timeout')), 45000)
+      );
+
+      content = await Promise.race([domPromise, timeoutPromise]);
+      this.logger.debug('✅ DOM processing completed');
+    } catch (error) {
+      if (error instanceof URLNotAllowedError) {
+        throw error;
+      }
+      this.logger.warning(`DOM processing timed out for ${logPageUrl}`);
+      this.logger.warning('🔄 Falling back to minimal DOM state...');
+
+      // Create minimal DOM state for fallback
+      const minimal_element_tree = new DOMElementNode(
+        true,
+        null,
+        'body',
+        '/body',
+        {},
+        []
+      );
+      content = new DOMState(minimal_element_tree, {});
+    } finally {
+      await this.validate_page_after_action(page);
+    }
+
+    // Get tabs info
+    this.logger.debug('📋 Getting tabs info...');
+    const tabs_info = await this.get_tabs_info();
+    this.logger.debug('✅ Tabs info completed');
+
+    // Screenshot
+    let screenshot_b64: string | null = null;
+    if (include_screenshot) {
+      try {
+        this.logger.debug('📸 Capturing screenshot...');
+        screenshot_b64 = await this.take_screenshot();
+      } catch (error) {
+        if (error instanceof URLNotAllowedError) {
+          throw error;
+        }
+        this.logger.warning(
+          `❌ Screenshot failed for ${logPageUrl}: ${(error as Error).message}`
+        );
+      } finally {
+        await this.validate_page_after_action(page);
+      }
+    }
+
+    // Get page info and scroll info
+    const page_info = await this.get_page_info(page);
+    if (
+      page_info &&
+      Number.isFinite(page_info.viewport_width) &&
+      Number.isFinite(page_info.viewport_height)
+    ) {
+      this._original_viewport_size = [
+        Math.floor(page_info.viewport_width),
+        Math.floor(page_info.viewport_height),
+      ];
+    }
+
+    let pixels_above = 0;
+    let pixels_below = 0;
+    try {
+      this.logger.debug('📏 Getting scroll info...');
+      const scroll_info = await Promise.race([
+        this.get_scroll_info(),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('timeout')), 5000)
+        ),
+      ]);
+
+      // Calculate pixels above/below viewport
+      pixels_above = Math.max(0, scroll_info.scroll_y);
+      const viewport_bottom =
+        scroll_info.scroll_y + scroll_info.viewport_height;
+      pixels_below = Math.max(0, scroll_info.page_height - viewport_bottom);
+
+      this.logger.debug('✅ Scroll info completed');
+    } catch (error) {
+      if (error instanceof URLNotAllowedError) {
+        throw error;
+      }
+      this.logger.warning(
+        `Failed to get scroll info: ${(error as Error).message}`
+      );
+    } finally {
+      await this.validate_page_after_action(page);
+    }
+
+    // Get title
+    let title = 'Title unavailable';
+    try {
+      await this.validate_page_after_action(page);
+      const titlePromise = readBoundedPageTitle(page);
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('timeout')), 3000)
+      );
+      title = await Promise.race([titlePromise, timeoutPromise]);
+    } catch (error) {
+      if (error instanceof URLNotAllowedError) {
+        throw error;
+      }
+      // Keep default title
+    } finally {
+      await this.validate_page_after_action(page);
+    }
+
+    // Check for errors
+    const browser_errors: string[] = [];
+    if (Object.keys(content.selector_map).length === 0) {
+      browser_errors.push(
+        `DOM processing timed out for ${logPageUrl} - using minimal state. Basic navigation still available.`
+      );
+    }
+
+    // Check if PDF viewer
+    await this.validate_page_after_action(page);
+    const is_pdf_viewer = await this._is_pdf_viewer(page);
+    await this.validate_page_after_action(page);
+
+    const pendingNetworkRequests = await this._getPendingNetworkRequests(page);
+    await this.validate_page_after_action(page);
+    const paginationButtons = DomService.detect_pagination_buttons(
+      content.selector_map
+    );
+    const browser_state = new BrowserStateSummary(content, {
+      url: page_url,
+      title,
+      tabs: tabs_info,
+      screenshot: screenshot_b64,
+      page_info,
+      pixels_above,
+      pixels_below,
+      browser_errors,
+      is_pdf_viewer,
+      loading_status: this.currentPageLoadingStatus,
+      recent_events: include_recent_events
+        ? this._getRecentEventsSummary()
+        : null,
+      pending_network_requests: pendingNetworkRequests,
+      pagination_buttons: paginationButtons,
+      closed_popup_messages: this._getClosedPopupMessagesSnapshot(),
+    });
+
+    this.logger.debug('✅ get_state_summary completed successfully');
+    await this.validate_page_after_action(page);
+    return browser_state;
+  }
+
+  /**
+   * Check if a URL is a new tab page
+   */
+  private _is_new_tab_page(url: string): boolean {
+    return (
+      url === 'about:blank' ||
+      url === 'about:newtab' ||
+      url === 'chrome://newtab/' ||
+      url === 'chrome://newtab' ||
+      url === 'chrome://new-tab-page/' ||
+      url === 'chrome://new-tab-page'
+    );
+  }
+
+  private _is_ip_address_host(hostname: string): boolean {
+    const normalized =
+      hostname.startsWith('[') && hostname.endsWith(']')
+        ? hostname.slice(1, -1)
+        : hostname;
+    return isIP(normalized) !== 0;
+  }
+
+  private _get_domain_variants(hostname: string): [string, string] {
+    const host = canonicalizeDomainHostname(hostname);
+    if (host.startsWith('www.')) {
+      return [host, host.slice(4)];
+    }
+    return [host, `www.${host}`];
+  }
+
+  private _setEntryMatchesUrl(
+    domains: Set<string>,
+    hostVariant: string,
+    hostAlt: string,
+    protocol: string,
+    policy: 'allow' | 'prohibit'
+  ) {
+    const exactMatch = domains.has(hostVariant);
+    const alternateMatch = domains.has(hostAlt);
+    const allowedWwwRootVariant =
+      policy === 'allow' &&
+      hostVariant.startsWith('www.') &&
+      hostAlt.split('.').length === 2 &&
+      alternateMatch;
+    if (
+      !exactMatch &&
+      !allowedWwwRootVariant &&
+      !(policy === 'prohibit' && alternateMatch)
+    ) {
+      return false;
+    }
+    // Set-optimized entries are exact hostnames without explicit schemes.
+    // Allowlists fail closed to HTTPS; blocklists must not be bypassable by
+    // downgrading an otherwise identical URL to HTTP.
+    return policy === 'prohibit' || protocol.toLowerCase() === 'https:';
+  }
+
+  private _domainPatternMatchesUrl(
+    url: string,
+    pattern: string,
+    policy: 'allow' | 'prohibit'
+  ): boolean {
+    if (match_url_with_domain_pattern(url, pattern, true)) {
+      return true;
+    }
+
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      return false;
+    }
+
+    // A scheme-less allowlist entry intentionally defaults to HTTPS so it
+    // fails closed. Applying that same default to a blocklist is unsafe: an
+    // otherwise identical HTTP URL would bypass the prohibition. Compare a
+    // canonical HTTPS equivalent for scheme-less prohibited patterns while
+    // continuing to honor explicit scheme-qualified patterns exactly.
+    if (policy === 'prohibit' && !pattern.includes('://')) {
+      const canonicalHost = canonicalizeDomainHostname(parsed.hostname);
+      if (
+        canonicalHost &&
+        match_url_with_domain_pattern(
+          `https://${canonicalHost}/`,
+          pattern,
+          true
+        )
+      ) {
+        return true;
+      }
+    }
+
+    // Browser domain policy treats a bare, simple root domain as covering its
+    // conventional www host too. Keep this policy-specific behavior out of the
+    // generic matcher used by action and sensitive-data domain filters.
+    const normalizedPattern = canonicalizeDomainHostname(pattern);
+    if (
+      !normalizedPattern ||
+      pattern.includes('://') ||
+      pattern.includes('*') ||
+      pattern.includes(':') ||
+      pattern.includes('/') ||
+      normalizedPattern.split('.').length !== 2
+    ) {
+      return false;
+    }
+
+    return (
+      (policy === 'prohibit' || parsed.protocol.toLowerCase() === 'https:') &&
+      canonicalizeDomainHostname(parsed.hostname) === `www.${normalizedPattern}`
+    );
+  }
+
+  private _domainCollectionHasEntries(
+    value: string[] | Set<string> | null | undefined
+  ): boolean {
+    return Array.isArray(value)
+      ? value.length > 0
+      : value instanceof Set && value.size > 0;
+  }
+
+  /**
+   * Check if page is displaying a PDF
+   */
+  private async _is_pdf_viewer(page: Page): Promise<boolean> {
+    await this.validate_page_after_action(page);
+    try {
+      const url = page.url();
+      if (url.endsWith('.pdf') || url.includes('.pdf?')) {
+        return true;
+      }
+
+      // Check for PDF viewer in page content
+      const is_pdf = await page.evaluate(() => {
+        return (
+          document.querySelector('embed[type="application/pdf"]') !== null ||
+          document.querySelector('object[type="application/pdf"]') !== null
+        );
+      });
+
+      return is_pdf;
+    } catch (error) {
+      if (error instanceof URLNotAllowedError) {
+        throw error;
+      }
+      return false;
+    } finally {
+      await this.validate_page_after_action(page);
+    }
+  }
+
+  /**
+   * Auto-download PDF if detected and auto-download is enabled
+   */
+  private async _auto_download_pdf_if_needed(
+    page: Page
+  ): Promise<string | null> {
+    const downloadsPath = this.browser_profile.downloads_path;
+    if (!downloadsPath || !this._autoDownloadPdfs) {
+      return null;
+    }
+
+    await this.validate_page_after_action(page);
+    try {
+      const is_pdf = await this._is_pdf_viewer(page);
+      if (!is_pdf) {
+        return null;
+      }
+
+      const url = page.url();
+      const logUrl = BrowserSession._redact_url_for_logging(url);
+      this.logger.info(`📄 PDF detected: ${logUrl}`);
+
+      let pdfFilename = path.basename(url.split('?')[0]);
+      if (!pdfFilename || !pdfFilename.toLowerCase().endsWith('.pdf')) {
+        const parsed = new URL(url);
+        pdfFilename = path.basename(parsed.pathname) || 'document.pdf';
+        if (!pdfFilename.toLowerCase().endsWith('.pdf')) {
+          pdfFilename += '.pdf';
+        }
+      }
+
+      if (
+        this.downloaded_files.some(
+          (downloaded) => path.basename(downloaded) === pdfFilename
+        )
+      ) {
+        this.logger.debug(`📄 PDF already downloaded: ${pdfFilename}`);
+        return null;
+      }
+
+      this.logger.info(`📄 Auto-downloading PDF from: ${logUrl}`);
+      await this.validate_page_after_action(page);
+      const redirectMode: RequestRedirect = this._has_url_access_restrictions()
+        ? 'error'
+        : 'follow';
+      const maxBytes = getMaxAutoDownloadBytes();
+      const timeoutMs = 30_000;
+      let downloadResult: {
+        data?: number[];
+        dataBase64?: string;
+        fromCache: boolean;
+        responseSize: number;
+        error?: string;
+      } | null = null;
+      try {
+        downloadResult = await page.evaluate(
+          async ({ pdfUrl, redirectMode, maxBytes, timeoutMs }) => {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), timeoutMs);
+            try {
+              const response = await fetch(pdfUrl, {
+                cache: 'force-cache',
+                redirect: redirectMode,
+                signal: controller.signal,
+              });
+              if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+              }
+
+              const contentLength = Number(
+                response.headers.get('content-length') ?? ''
+              );
+              if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+                throw new Error(
+                  `PDF exceeds maximum auto-download size of ${maxBytes} bytes`
+                );
+              }
+
+              const chunks: Uint8Array[] = [];
+              let responseSize = 0;
+              if (response.body) {
+                const reader = response.body.getReader();
+                while (true) {
+                  const { done, value } = await reader.read();
+                  if (done) break;
+                  if (!value) continue;
+                  responseSize += value.byteLength;
+                  if (responseSize > maxBytes) {
+                    await reader.cancel();
+                    throw new Error(
+                      `PDF exceeds maximum auto-download size of ${maxBytes} bytes`
+                    );
+                  }
+                  chunks.push(value);
+                }
+              } else {
+                const value = new Uint8Array(await response.arrayBuffer());
+                responseSize = value.byteLength;
+                if (responseSize > maxBytes) {
+                  throw new Error(
+                    `PDF exceeds maximum auto-download size of ${maxBytes} bytes`
+                  );
+                }
+                chunks.push(value);
+              }
+
+              const bytes = new Uint8Array(responseSize);
+              let byteOffset = 0;
+              for (const chunk of chunks) {
+                bytes.set(chunk, byteOffset);
+                byteOffset += chunk.byteLength;
+              }
+              const binaryChunks: string[] = [];
+              for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+                binaryChunks.push(
+                  String.fromCharCode(
+                    ...bytes.subarray(offset, offset + 0x8000)
+                  )
+                );
+              }
+              const dataBase64 = btoa(binaryChunks.join(''));
+              const cacheHeader = response.headers.get('x-cache') || '';
+              const fromCache =
+                response.headers.has('age') ||
+                cacheHeader.toLowerCase().includes('hit');
+
+              return {
+                dataBase64,
+                fromCache,
+                responseSize,
+              };
+            } catch (error) {
+              return {
+                dataBase64: '',
+                fromCache: false,
+                responseSize: 0,
+                error:
+                  error instanceof Error
+                    ? error.message
+                    : 'Unknown fetch error',
+              };
+            } finally {
+              clearTimeout(timeout);
+            }
+          },
+          { pdfUrl: url, redirectMode, maxBytes, timeoutMs }
+        );
+      } finally {
+        await this.validate_page_after_action(page);
+      }
+
+      if (downloadResult?.error) {
+        this.logger.warning(
+          `⚠️ Failed to auto-download PDF from ${logUrl}: ${downloadResult.error}`
+        );
+        return null;
+      }
+
+      if (!downloadResult) {
+        this.logger.warning(
+          `⚠️ No data received when downloading PDF from ${logUrl}`
+        );
+        return null;
+      }
+
+      let pdfBuffer: Buffer;
+      if (typeof downloadResult.dataBase64 === 'string') {
+        const normalizedBase64 = downloadResult.dataBase64.trim();
+        const padding = normalizedBase64.endsWith('==')
+          ? 2
+          : normalizedBase64.endsWith('=')
+            ? 1
+            : 0;
+        const estimatedBytes =
+          Math.floor((normalizedBase64.length * 3) / 4) - padding;
+        if (!normalizedBase64 || estimatedBytes > maxBytes) {
+          this.logger.warning(
+            `⚠️ Refusing oversized PDF auto-download from ${logUrl}`
+          );
+          return null;
+        }
+        pdfBuffer = Buffer.from(normalizedBase64, 'base64');
+      } else if (Array.isArray(downloadResult.data)) {
+        if (
+          downloadResult.data.length === 0 ||
+          downloadResult.data.length > maxBytes
+        ) {
+          this.logger.warning(
+            `⚠️ Refusing oversized PDF auto-download from ${logUrl}`
+          );
+          return null;
+        }
+        pdfBuffer = Buffer.from(downloadResult.data);
+      } else {
+        this.logger.warning(
+          `⚠️ No data received when downloading PDF from ${logUrl}`
+        );
+        return null;
+      }
+
+      if (pdfBuffer.length === 0 || pdfBuffer.length > maxBytes) {
+        this.logger.warning(
+          `⚠️ Refusing oversized PDF auto-download from ${logUrl}`
+        );
+        return null;
+      }
+
+      ensurePrivateDirectoryIfCreated(downloadsPath);
+      const uniqueFilename = await BrowserSession.get_unique_filename(
+        downloadsPath,
+        pdfFilename
+      );
+      const downloadPath = path.join(downloadsPath, uniqueFilename);
+
+      await fs.promises.writeFile(downloadPath, pdfBuffer, { mode: 0o600 });
+      chmodPrivateFileBestEffort(downloadPath);
+      this.add_downloaded_file(downloadPath);
+
+      const cacheStatus = downloadResult.fromCache
+        ? 'from cache'
+        : 'from network';
+      const responseSize = Number(downloadResult.responseSize || 0);
+      this.logger.info(
+        `📄 Auto-downloaded PDF (${cacheStatus}, ${responseSize.toLocaleString()} bytes): ${downloadPath}`
+      );
+
+      return downloadPath;
+    } catch (error) {
+      if (error instanceof URLNotAllowedError) {
+        throw error;
+      }
+      this.logger.debug(`PDF detection failed: ${(error as Error).message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Check if an element is visible on the page
+   */
+  private async _is_visible(element: any): Promise<boolean> {
+    try {
+      const is_hidden = await element.isHidden();
+      const bbox = await element.boundingBox();
+
+      return !is_hidden && bbox !== null && bbox.width > 0 && bbox.height > 0;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  /**
+   * Locate an element by XPath
+   */
+  async get_locate_element_by_xpath(xpath: string): Promise<any> {
+    const page = await this.get_current_page();
+    if (!page) {
+      return null;
+    }
+
+    await this.validate_page_after_action(page);
+    try {
+      // Use XPath to locate the element
+      const element_handle = await page
+        .locator(`xpath=${xpath}`)
+        .elementHandle();
+      if (element_handle) {
+        const is_visible = await this._is_visible(element_handle);
+        if (is_visible) {
+          await element_handle.scrollIntoViewIfNeeded({ timeout: 1000 });
+        }
+        return element_handle;
+      }
+      return null;
+    } catch (error) {
+      this.logger.error(
+        `❌ Failed to locate xpath ${xpath}: ${(error as Error).message}`
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Locate an element by CSS selector
+   */
+  async get_locate_element_by_css_selector(css_selector: string): Promise<any> {
+    const page = await this.get_current_page();
+    if (!page) {
+      return null;
+    }
+
+    await this.validate_page_after_action(page);
+    try {
+      // Use CSS selector to locate the element
+      const element_handle = await page.locator(css_selector).elementHandle();
+      if (element_handle) {
+        const is_visible = await this._is_visible(element_handle);
+        if (is_visible) {
+          await element_handle.scrollIntoViewIfNeeded({ timeout: 1000 });
+        }
+        return element_handle;
+      }
+      return null;
+    } catch (error) {
+      this.logger.error(
+        `❌ Failed to locate element ${css_selector}: ${(error as Error).message}`
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Locate an element by text content
+   * @param text - Text to search for
+   * @param nth - Which matching element to return (0-based index)
+   * @param element_type - Optional tag name to filter by (e.g., 'button', 'span')
+   */
+  async get_locate_element_by_text(
+    text: string,
+    nth: number = 0,
+    element_type: string | null = null
+  ): Promise<any> {
+    const page = await this.get_current_page();
+    if (!page) {
+      return null;
+    }
+
+    await this.validate_page_after_action(page);
+    try {
+      // Build selector: filter by element type and text
+      const selector = element_type
+        ? `${element_type}:text("${text}")`
+        : `:text("${text}")`;
+
+      // Get all matching elements
+      const locator = page.locator(selector);
+      const count = await locator.count();
+
+      if (count === 0) {
+        this.logger.error(`❌ No element with text '${text}' found`);
+        return null;
+      }
+
+      // Filter visible elements
+      const visible_elements: any[] = [];
+      for (let i = 0; i < count; i++) {
+        const element_handle = await locator.nth(i).elementHandle();
+        if (element_handle && (await this._is_visible(element_handle))) {
+          visible_elements.push(element_handle);
+        }
+      }
+
+      if (visible_elements.length === 0) {
+        this.logger.error(`❌ No visible element with text '${text}' found`);
+        return null;
+      }
+
+      if (nth >= visible_elements.length) {
+        this.logger.error(
+          `❌ Element with text '${text}' not found at index #${nth}`
+        );
+        return null;
+      }
+
+      const element_handle = visible_elements[nth];
+      const is_visible = await this._is_visible(element_handle);
+      if (is_visible) {
+        await element_handle.scrollIntoViewIfNeeded({ timeout: 1000 });
+      }
+
+      return element_handle;
+    } catch (error) {
+      this.logger.error(
+        `❌ Failed to locate element by text '${text}': ${(error as Error).message}`
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Check if browser session is connected and has valid browser/context objects
+   * @param restart - If true, attempt to create a new tab if no pages exist
+   */
+  async is_connected(restart: boolean = true): Promise<boolean> {
+    if (!this.browser_context) {
+      return false;
+    }
+
+    try {
+      // Check if browser is connected
+      if (this.browser && !(this.browser as any).isConnected()) {
+        return false;
+      }
+
+      // Check if browser context's browser is connected (context may reference a different browser object)
+      const context_browser = (this.browser_context as any).browser?.();
+      if (context_browser && !(context_browser as any).isConnected()) {
+        return false;
+      }
+
+      // Check if context has at least one page
+      const pages = this.browser_context.pages();
+      if (pages.length === 0) {
+        if (restart) {
+          // Try to create a new page to keep context alive
+          try {
+            await this.browser_context.newPage();
+          } catch (error) {
+            return false;
+          }
+        } else {
+          return false;
+        }
+      }
+
+      return true;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  /**
+   * Check if a URL is allowed based on allowed_domains configuration
+   * @param url - URL to check
+   */
+  private _get_url_access_denial_reason(url: string): string | null {
+    // Always allow new tab pages and browser-internal pages we intentionally use.
+    if (this._is_new_tab_page(url)) {
+      return null;
+    }
+
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      return 'invalid_url';
+    }
+
+    const allowedDomains = this.browser_profile.allowed_domains;
+    const hasAllowedDomains = this._domainCollectionHasEntries(allowedDomains);
+    const prohibitedDomains = this.browser_profile.prohibited_domains;
+    const hasProhibitedDomains =
+      this._domainCollectionHasEntries(prohibitedDomains);
+    const hasDomainRestrictions = hasAllowedDomains || hasProhibitedDomains;
+
+    if (parsed.protocol === 'data:') {
+      return hasDomainRestrictions ? 'opaque_origin_blocked' : null;
+    }
+
+    if (parsed.protocol === 'blob:') {
+      if (parsed.origin && parsed.origin !== 'null') {
+        return this._get_url_access_denial_reason(parsed.origin);
+      }
+      return hasDomainRestrictions ? 'opaque_origin_blocked' : null;
+    }
+
+    if (!parsed.hostname) {
+      return 'missing_host';
+    }
+    const [hostVariant, hostAlt] = this._get_domain_variants(parsed.hostname);
+
+    if (
+      this.browser_profile.block_ip_addresses &&
+      this._is_ip_address_host(parsed.hostname)
+    ) {
+      return 'ip_address_blocked';
+    }
+
+    if (prohibitedDomains && hasProhibitedDomains) {
+      if (prohibitedDomains instanceof Set) {
+        if (
+          this._setEntryMatchesUrl(
+            prohibitedDomains,
+            hostVariant,
+            hostAlt,
+            parsed.protocol,
+            'prohibit'
+          )
+        ) {
+          return 'in_prohibited_domains';
+        }
+      } else {
+        for (const prohibitedDomain of prohibitedDomains) {
+          try {
+            if (
+              this._domainPatternMatchesUrl(url, prohibitedDomain, 'prohibit')
+            ) {
+              return 'in_prohibited_domains';
+            }
+          } catch {
+            this.logger.warning(`Invalid domain pattern: ${prohibitedDomain}`);
+          }
+        }
+      }
+    }
+
+    if (allowedDomains && hasAllowedDomains) {
+      if (allowedDomains instanceof Set) {
+        if (
+          this._setEntryMatchesUrl(
+            allowedDomains,
+            hostVariant,
+            hostAlt,
+            parsed.protocol,
+            'allow'
+          )
+        ) {
+          return null;
+        }
+      } else {
+        for (const allowedDomain of allowedDomains) {
+          try {
+            if (this._domainPatternMatchesUrl(url, allowedDomain, 'allow')) {
+              return null;
+            }
+          } catch {
+            this.logger.warning(`Invalid domain pattern: ${allowedDomain}`);
+          }
+        }
+      }
+      return 'not_in_allowed_domains';
+    }
+
+    return null;
+  }
+
+  private _is_url_allowed(url: string): boolean {
+    return this._get_url_access_denial_reason(url) === null;
+  }
+
+  is_url_allowed(url: string): boolean {
+    return this._is_url_allowed(url);
+  }
+
+  private _formatDomainCollection(
+    value: string[] | Set<string> | null | undefined
+  ) {
+    if (value instanceof Set) {
+      return JSON.stringify(Array.from(value));
+    }
+    return JSON.stringify(value ?? null);
+  }
+
+  private _has_url_access_restrictions() {
+    return (
+      this._domainCollectionHasEntries(this.browser_profile.allowed_domains) ||
+      this._domainCollectionHasEntries(
+        this.browser_profile.prohibited_domains
+      ) ||
+      Boolean(this.browser_profile.block_ip_addresses)
+    );
+  }
+
+  private _sanitize_tab_for_exposure<T extends TabInfo>(tab: T): T {
+    const bounded = {
+      ...tab,
+      url: boundBrowserStateUrl(tab.url),
+      title: boundBrowserStateTitle(tab.title),
+    } as T;
+    if (!this._has_url_access_restrictions()) {
+      return bounded;
+    }
+    const denialReason = this._get_url_access_denial_reason(tab.url);
+    if (!denialReason) {
+      return bounded;
+    }
+    return {
+      ...bounded,
+      url: 'about:blank',
+      title: 'blocked by domain policy',
+    };
+  }
+
+  private _assert_url_allowed(url: string) {
+    const denialReason = this._get_url_access_denial_reason(url);
+    if (!denialReason) {
+      return;
+    }
+    const safeUrl = BrowserSession._redact_url_for_logging(url);
+    this._recordRecentEvent('navigation_blocked', {
+      url: safeUrl,
+      error_message: denialReason,
+    });
+
+    if (denialReason === 'not_in_allowed_domains') {
+      throw new URLNotAllowedError(
+        `URL ${safeUrl} is not in allowed_domains. Current allowed_domains: ${this._formatDomainCollection(
+          this.browser_profile.allowed_domains
+        )}`
+      );
+    }
+
+    if (denialReason === 'in_prohibited_domains') {
+      throw new URLNotAllowedError(
+        `URL ${safeUrl} is blocked by prohibited_domains. Current prohibited_domains: ${this._formatDomainCollection(
+          this.browser_profile.prohibited_domains
+        )}`
+      );
+    }
+
+    if (denialReason === 'ip_address_blocked') {
+      throw new URLNotAllowedError(
+        `URL ${safeUrl} is blocked because block_ip_addresses=true`
+      );
+    }
+
+    if (denialReason === 'opaque_origin_blocked') {
+      throw new URLNotAllowedError(
+        `URL ${safeUrl} is blocked because its origin cannot be validated against domain restrictions`
+      );
+    }
+
+    throw new URLNotAllowedError(
+      `URL ${safeUrl} is not allowed (${denialReason})`
+    );
+  }
+
+  private async _rollback_disallowed_navigation(
+    page: Page,
+    blockedUrl: string,
+    options: { replace_on_failure?: boolean } = {}
+  ) {
+    this.logger.warning(
+      `Blocked navigation reached disallowed URL ${BrowserSession._redact_url_for_logging(
+        blockedUrl
+      )}; resetting current tab to about:blank`
+    );
+    try {
+      await page.goto('about:blank', { waitUntil: 'load', timeout: 5000 });
+    } catch (rollbackError) {
+      this.logger.debug(
+        `Failed to reset disallowed navigation to about:blank: ${(rollbackError as Error).message}`
+      );
+    }
+
+    const currentUrl =
+      typeof page.url === 'function' ? page.url() : 'about:blank';
+    if (this._is_new_tab_page(currentUrl)) {
+      this.currentUrl = 'about:blank';
+      this.currentTitle = 'about:blank';
+      const tab = this._tabs[this.currentTabIndex];
+      if (tab) {
+        tab.url = 'about:blank';
+        tab.title = 'about:blank';
+      }
+      this._syncSessionManagerFromTabs();
+      this.cachedBrowserState = null;
+      return;
+    }
+
+    if (options.replace_on_failure ?? true) {
+      await this._replace_disallowed_current_page(page, blockedUrl);
+    }
+  }
+
+  private async _replace_disallowed_current_page(
+    page: Page,
+    blockedUrl: string
+  ) {
+    const safeUrl = BrowserSession._redact_url_for_logging(blockedUrl);
+    let replacementPage: Page | null = null;
+    const canCreateReplacement =
+      typeof this.browser_context?.newPage === 'function';
+
+    if (canCreateReplacement) {
+      try {
+        replacementPage = await this.browser_context!.newPage();
+        try {
+          await replacementPage.goto('about:blank', {
+            waitUntil: 'load',
+            timeout: 5000,
+          });
+        } catch (error) {
+          this.logger.debug(
+            `Failed to initialize replacement blank tab after blocked navigation to ${safeUrl}: ${(error as Error).message}`
+          );
+        }
+        const replacementUrl =
+          typeof replacementPage.url === 'function'
+            ? replacementPage.url()
+            : 'about:blank';
+        if (!this._is_new_tab_page(replacementUrl)) {
+          await replacementPage.close?.();
+          replacementPage = null;
+        }
+      } catch (error) {
+        this.logger.debug(
+          `Failed to create replacement blank tab after blocked navigation to ${safeUrl}: ${(error as Error).message}`
+        );
+        replacementPage = null;
+      }
+    }
+
+    try {
+      await page.close?.();
+    } catch (error) {
+      this.logger.debug(
+        `Failed to close blocked page after rollback failure: ${(error as Error).message}`
+      );
+    }
+
+    this.currentUrl = 'about:blank';
+    this.currentTitle = 'about:blank';
+    const tab = this._tabs[this.currentTabIndex];
+    if (tab) {
+      tab.url = 'about:blank';
+      tab.title = 'about:blank';
+    }
+    if (this.human_current_page === page) {
+      this.human_current_page = replacementPage;
+    }
+    this._setActivePage(replacementPage);
+    this._syncSessionManagerFromTabs();
+    this.cachedBrowserState = null;
+  }
+
+  private async _assert_page_url_allowed_or_rollback(
+    page: Page,
+    options: { replace_on_failure?: boolean } = {}
+  ) {
+    const currentUrl =
+      typeof page.url === 'function' ? page.url() : 'about:blank';
+    try {
+      this._assert_url_allowed(currentUrl);
+    } catch (error) {
+      if (error instanceof URLNotAllowedError) {
+        await this._rollback_disallowed_navigation(page, currentUrl, options);
+      }
+      throw error;
+    }
+  }
+
+  private async _get_disallowed_page_error_after_navigation_error(
+    page: Page | null,
+    options: { replace_on_failure?: boolean } = {}
+  ) {
+    if (!page) {
+      return null;
+    }
+    try {
+      await this._assert_page_url_allowed_or_rollback(page, options);
+      return null;
+    } catch (error) {
+      if (error instanceof URLNotAllowedError) {
+        return error;
+      }
+      this.logger.debug(
+        `Failed to inspect page URL after navigation error: ${(error as Error).message}`
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Navigate helper with URL validation
+   */
+  async navigate(url: string): Promise<void> {
+    this._assert_url_allowed(url);
+    await this.navigate_to(url);
+  }
+
+  /**
+   * Kill the browser session (force close even if keep_alive=true)
+   */
+  async kill(): Promise<void> {
+    this.logger.info('💀 Force killing browser session...');
+
+    // Temporarily disable keep_alive to ensure browser closes
+    const original_keep_alive = this.browser_profile.keep_alive;
+    this.browser_profile.keep_alive = false;
+
+    try {
+      await this.close();
+    } finally {
+      // Restore original keep_alive setting
+      this.browser_profile.keep_alive = original_keep_alive;
+    }
+  }
+
+  /**
+   * Alias for close() to match Python API
+   */
+  async stop(): Promise<void> {
+    if (this.browser_profile.keep_alive) {
+      this.logger.info(
+        '🕊️ BrowserSession.stop() called but keep_alive=true, leaving browser running. Use .kill() to force close.'
+      );
+      return;
+    }
+
+    if (this._stoppingPromise) {
+      await this._stoppingPromise;
+      return;
+    }
+
+    const hasActiveResources =
+      this.initialized ||
+      Boolean(
+        this.browser ||
+        this.browser_context ||
+        this.browser_pid ||
+        this._subprocess ||
+        this._childProcesses.size > 0
+      );
+    if (!hasActiveResources) {
+      return;
+    }
+
+    this._stoppingPromise = Promise.resolve().then(async () => {
+      await this.event_bus.dispatch(new BrowserStopEvent());
+      await this._shutdown_browser_session();
+    });
+
+    try {
+      await this._stoppingPromise;
+      this._recordRecentEvent('browser_stopped');
+      await this.event_bus.dispatch(new BrowserStoppedEvent());
+    } finally {
+      this.detach_all_watchdogs();
+      await this.event_bus.stop();
+      this._stoppingPromise = null;
+    }
+  }
+
+  /**
+   * Perform a click action with download and navigation handling
+   * @param element_node - DOM element to click
+   */
+  async perform_click(element_node: DOMElementNode): Promise<string | null> {
+    const page = await this.get_current_page();
+    if (!page) {
+      throw new Error('No current page available');
+    }
+
+    const element_handle = await this.get_locate_element(element_node);
+    if (!element_handle) {
+      throw new Error(`Element not found: ${JSON.stringify(element_node)}`);
+    }
+
+    const validateClickNavigation = async () => {
+      await this._waitForLoad(page, 5000);
+      await this._assert_page_url_allowed_or_rollback(page);
+      await this._syncCurrentTabFromPage(page);
+      if (this.historyStack[this.historyStack.length - 1] !== this.currentUrl) {
+        this.historyStack.push(this.currentUrl);
+      }
+      this.cachedBrowserState = null;
+    };
+
+    try {
+      // Check if downloads are enabled
+      const downloads_path = this.browser_profile.downloads_path;
+      if (downloads_path) {
+        ensurePrivateDirectoryIfCreated(downloads_path);
+
+        // Try to detect file download.
+        const download_promise = page.waitForEvent('download', {
+          timeout: 5000,
+        });
+
+        // Click failures should bubble to the caller.
+        try {
+          await element_handle.click();
+        } catch (error) {
+          void download_promise.catch(() => undefined);
+          throw error;
+        }
+
+        let download: any;
+        try {
+          download = await download_promise;
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          const isDownloadTimeout =
+            error instanceof Error &&
+            (error.name === 'TimeoutError' ||
+              message.toLowerCase().includes('timeout'));
+          if (!isDownloadTimeout) {
+            throw error;
+          }
+          this.logger.debug(
+            'No download triggered within timeout. Checking navigation...'
+          );
+          return null;
+        }
+
+        // Save the downloaded file.
+        const suggested_filename = download.suggestedFilename();
+        const unique_filename = await BrowserSession.get_unique_filename(
+          downloads_path,
+          suggested_filename
+        );
+        const download_path = path.join(downloads_path, unique_filename);
+        const download_guid = uuid7str();
+        const download_url =
+          typeof download.url === 'function'
+            ? download.url()
+            : (this.currentUrl ?? '');
+        await this._assert_download_url_allowed(download, download_url);
+        await this.event_bus.dispatch(
+          new DownloadStartedEvent({
+            guid: download_guid,
+            url: download_url,
+            suggested_filename,
+            auto_download: false,
+          })
+        );
+
+        await download.saveAs(download_path);
+        chmodPrivateFileBestEffort(download_path);
+        this.logger.info(`⬇️ Downloaded file to: ${download_path}`);
+        const stats = fs.existsSync(download_path)
+          ? fs.statSync(download_path)
+          : null;
+        await this.event_bus.dispatch(
+          new DownloadProgressEvent({
+            guid: download_guid,
+            received_bytes: stats?.size ?? 0,
+            total_bytes: stats?.size ?? 0,
+            state: 'completed',
+          })
+        );
+
+        const fileDownloadedResult = await this.event_bus.dispatch(
+          new FileDownloadedEvent({
+            guid: download_guid,
+            url: download_url,
+            path: download_path,
+            file_name: unique_filename,
+            file_size: stats?.size ?? 0,
+            file_type: path.extname(unique_filename).replace('.', '') || null,
+            mime_type: null,
+            auto_download: false,
+          })
+        );
+        if (fileDownloadedResult.handler_results.length === 0) {
+          this.add_downloaded_file(download_path);
+        }
+
+        return download_path;
+      } else {
+        // No downloads path configured, just click
+        await element_handle.click();
+      }
+
+      return null;
+    } finally {
+      await validateClickNavigation();
+    }
+  }
+
+  /**
+   * Remove all highlights from the current page
+   */
+  async remove_highlights(): Promise<void> {
+    const page = await this.get_current_page();
+    if (!page) {
+      return;
+    }
+
+    try {
+      await page.evaluate(() => {
+        const pageWindow = window as Window & {
+          _highlightCleanupFunctions?: Array<() => void>;
+        };
+
+        const cleanupFunctions = Array.isArray(
+          pageWindow._highlightCleanupFunctions
+        )
+          ? pageWindow._highlightCleanupFunctions
+          : [];
+
+        for (const cleanupFn of cleanupFunctions) {
+          try {
+            if (typeof cleanupFn === 'function') {
+              cleanupFn();
+            }
+          } catch {
+            // Ignore callback cleanup failures.
+          }
+        }
+        pageWindow._highlightCleanupFunctions = [];
+
+        const containers = document.querySelectorAll(
+          '#playwright-highlight-container'
+        );
+        containers.forEach((element) => element.remove());
+
+        const labels = document.querySelectorAll('.playwright-highlight-label');
+        labels.forEach((element) => element.remove());
+
+        // Backward compatibility with legacy selectors.
+        const highlights = document.querySelectorAll('.browser-use-highlight');
+        highlights.forEach((element) => element.remove());
+        const styled = document.querySelectorAll('[style*="browser-use"]');
+        styled.forEach((element: any) => {
+          if (element.style) {
+            element.style.outline = '';
+            element.style.border = '';
+          }
+        });
+      });
+    } catch (error) {
+      this.logger.debug(
+        `Failed to remove highlights: ${(error as Error).message}`
+      );
+    } finally {
+      await this.validate_page_after_action(page);
+    }
+  }
+
+  // region - Trace Recording
+
+  /**
+   * Start tracing on browser context if traces_dir is configured
+   * Note: Currently optional as it may cause performance issues in some cases
+   */
+  async start_trace_recording(): Promise<void> {
+    await this._startContextTracing();
+  }
+
+  /**
+   * Save browser trace recording if active
+   */
+  async save_trace_recording(): Promise<void> {
+    await this._saveTraceRecording();
+  }
+
+  /**
+   * Start tracing on browser context if traces_dir is configured
+   * Note: Currently optional as it may cause performance issues in some cases
+   */
+  private async _startContextTracing(): Promise<void> {
+    if (
+      this.browser_profile.traces_dir &&
+      this._has_url_access_restrictions()
+    ) {
+      this.logger.warning(
+        'Skipping trace recording because domain restrictions are active and trace artifacts cannot be URL-filtered.'
+      );
+      return;
+    }
+    if (this.browser_profile.traces_dir && this.browser_context) {
+      try {
+        this.logger.debug(
+          `📽️ Starting tracing (will save to: ${this.browser_profile.traces_dir})`
+        );
+        await this.browser_context.tracing.start({
+          screenshots: true,
+          snapshots: true,
+          sources: false, // Reduce trace size
+        });
+      } catch (error) {
+        this.logger.warning(
+          `Failed to start tracing: ${(error as Error).message}`
+        );
+        throw error;
+      }
+    }
+  }
+
+  /**
+   * Save browser trace recording
+   */
+  private async _saveTraceRecording(): Promise<void> {
+    if (
+      this.browser_profile.traces_dir &&
+      this._has_url_access_restrictions()
+    ) {
+      return;
+    }
+    if (this.browser_profile.traces_dir && this.browser_context) {
+      try {
+        const tracesPath = this.browser_profile.traces_dir;
+        let finalTracePath: string;
+
+        // Check if path has extension
+        if (path.extname(tracesPath)) {
+          // Path has extension, use as-is (user specified exact file path)
+          finalTracePath = tracesPath;
+        } else {
+          // Path has no extension, treat as directory and create filename
+          const traceFilename = `BrowserSession_${this.id}.zip`;
+          finalTracePath = path.join(tracesPath, traceFilename);
+        }
+
+        ensurePrivateDirectoryIfCreated(path.dirname(finalTracePath));
+        this.logger.info(
+          `🎥 Saving browser_context trace to ${finalTracePath}...`
+        );
+        await this.browser_context.tracing.stop({ path: finalTracePath });
+        chmodPrivateFileBestEffort(finalTracePath);
+      } catch (error) {
+        this.logger.warning(
+          `Failed to save trace recording: ${(error as Error).message}`
+        );
+        throw error;
+      }
+    }
+  }
+
+  // endregion
+
+  // region - CDP Advanced Integration
+
+  /**
+   * Scroll using CDP Input.synthesizeScrollGesture for universal compatibility
+   * @param page - The page to scroll
+   * @param pixels - Number of pixels to scroll (positive = up, negative = down)
+   * @returns true if successful, false if failed
+   */
+  private async _scrollWithCdpGesture(
+    page: Page,
+    pixels: number
+  ): Promise<boolean> {
+    try {
+      // Use CDP to synthesize scroll gesture - works in all contexts including PDFs
+      const cdpSession = await this.get_or_create_cdp_session(page);
+
+      // Get viewport center for scroll origin
+      const viewport = await page.evaluate(() => ({
+        width: window.innerWidth,
+        height: window.innerHeight,
+      }));
+
+      const centerX = Math.floor(viewport.width / 2);
+      const centerY = Math.floor(viewport.height / 2);
+
+      await cdpSession.send('Input.synthesizeScrollGesture', {
+        x: centerX,
+        y: centerY,
+        xDistance: 0,
+        yDistance: -pixels, // Negative = scroll down, Positive = scroll up
+        gestureSourceType: 'mouse', // Use mouse gestures for better compatibility
+        speed: 3000, // Pixels per second
+      });
+
+      try {
+        await Promise.race([
+          cdpSession.detach(),
+          new Promise<void>((resolve) => setTimeout(resolve, 1000)),
+        ]);
+      } catch {
+        // Ignore detach errors
+      }
+
+      this.logger.debug(
+        `📄 Scrolled via CDP Input.synthesizeScrollGesture: ${pixels}px`
+      );
+      return true;
+    } catch (error) {
+      this.logger.warning(
+        `❌ Scrolling via CDP Input.synthesizeScrollGesture failed: ${(error as Error).message}`
+      );
+      return false;
+    }
+  }
+
+  /**
+   * Scroll the current page container
+   * @param pixels - Number of pixels to scroll (positive = down, negative = up)
+   */
+  private async _scrollContainer(pixels: number): Promise<void> {
+    const page = await this.getCurrentPage();
+    if (!page) {
+      throw new Error('No active page available for scrolling');
+    }
+
+    // Try CDP scroll gesture first (works universally including PDFs)
+    if (await this._scrollWithCdpGesture(page, pixels)) {
+      return;
+    }
+
+    // Fallback to JavaScript for older browsers or when CDP fails
+    this.logger.debug('Falling back to JavaScript scrolling');
+    await page.evaluate(SMART_SCROLL_JS, pixels);
+  }
+
+  /**
+   * Compute hashes for all clickable elements in the selector map
+   * @param selectorMap - Selector map from DOM state
+   * @returns Set of element hashes
+   */
+  private _computeElementHashes(selectorMap: SelectorMap): Set<string> {
+    const hashes = new Set<string>();
+
+    for (const [index, element] of Object.entries(selectorMap)) {
+      if (element instanceof DOMElementNode) {
+        // Create hash from element's xpath and key attributes
+        const hashParts = [
+          element.xpath || '',
+          element.tag_name || '',
+          JSON.stringify(element.attributes || {}),
+        ];
+        const hash = hashParts.join('|');
+        hashes.add(hash);
+      }
+    }
+
+    return hashes;
+  }
+
+  /**
+   * Mark elements in the selector map as new if they weren't in the cached hashes
+   * @param selectorMap - Selector map to update
+   * @param cachedHashes - Previously cached element hashes
+   */
+  private _markNewElements(
+    selectorMap: SelectorMap,
+    cachedHashes: Set<string>
+  ): void {
+    for (const [index, element] of Object.entries(selectorMap)) {
+      if (element instanceof DOMElementNode) {
+        // Create hash for current element
+        const hashParts = [
+          element.xpath || '',
+          element.tag_name || '',
+          JSON.stringify(element.attributes || {}),
+        ];
+        const hash = hashParts.join('|');
+
+        // Mark as new if not in cached hashes
+        if (!cachedHashes.has(hash)) {
+          // Add a marker to the element's attributes to indicate it's new
+          element.attributes = element.attributes || {};
+          (element.attributes as any)['__browser_use_new_element'] = true;
+        }
+      }
+    }
+  }
+
+  /**
+   * Helper to get a safe method name from the calling context
+   * Used for recovery error messages
+   */
+  private _getCurrentMethodName(): string {
+    try {
+      const stack = new Error().stack;
+      if (!stack) return 'unknown';
+
+      const lines = stack.split('\n');
+      // Skip first 3 lines: Error, this method, and the caller
+      const callerLine = lines[3] || '';
+      const match = callerLine.match(/at (?:BrowserSession\.)?(\w+)/);
+      return match ? match[1] : 'unknown';
+    } catch {
+      return 'unknown';
+    }
+  }
+
+  /**
+   * Get current page with fallback logic
+   * Alias for compatibility with Python API
+   */
+  async getCurrentPage(): Promise<Page | null> {
+    return await this.get_current_page();
+  }
+
+  /**
+   * Log warning about unsafe glob patterns
+   * @param pattern - The glob pattern being used
+   */
+  private _logGlobWarning(pattern: string): void {
+    const unsafePatterns = [
+      '**/*',
+      '**/.*',
+      '~/*',
+      '/etc/*',
+      '/sys/*',
+      '/proc/*',
+    ];
+    const isUnsafe = unsafePatterns.some(
+      (unsafe) =>
+        pattern.includes(unsafe) ||
+        pattern.startsWith(unsafe.replace('**/', ''))
+    );
+
+    if (isUnsafe) {
+      this.logger.warning(
+        `⚠️ Potentially unsafe glob pattern detected: "${pattern}". ` +
+          `This could access system files or expose sensitive data.`
+      );
+    }
+  }
+
+  /**
+   * Create a shallow copy of the browser session
+   * Note: This doesn't copy the actual browser instance, just the session metadata
+   * @returns A new BrowserSession instance with copied state
+   */
+  modelCopy(): BrowserSession {
+    const copy = new BrowserSession({
+      id: this.id,
+      browser_profile: this.browser_profile,
+      browser: this.browser,
+      browser_context: this.browser_context,
+      page: this.agent_current_page,
+      title: this.currentTitle,
+      url: this.currentUrl,
+      wss_url: this.wss_url,
+      cdp_url: this.cdp_url,
+      browser_pid: this.browser_pid,
+      playwright: this.playwright,
+      downloaded_files: [...this.downloaded_files],
+      closed_popup_messages: [...this._closedPopupMessages],
+    });
+    copy.llm_screenshot_size = this.llm_screenshot_size
+      ? [...this.llm_screenshot_size]
+      : null;
+    copy._original_viewport_size = this._original_viewport_size
+      ? [...this._original_viewport_size]
+      : null;
+    return copy;
+  }
+
+  model_copy(): BrowserSession {
+    return this.modelCopy();
+  }
+
+  // endregion
+
+  // region - Page Health Check and Recovery
+
+  private _inRecovery = false;
+
+  /**
+   * Check if a page is responsive by trying to evaluate simple JavaScript
+   * @param page - The page to check
+   * @param timeout - Timeout in seconds (default: 5.0)
+   * @returns true if page is responsive, false otherwise
+   */
+  private async _isPageResponsive(
+    page: Page,
+    timeout: number = 5.0
+  ): Promise<boolean> {
+    try {
+      const timeoutMs =
+        requireBrowserTimeoutSeconds(timeout, 'page responsiveness timeout') *
+        1000;
+      await Promise.race([
+        page.evaluate('1'),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('Timeout')), timeoutMs)
+        ),
+      ]);
+      return true;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  /**
+   * Force close a crashed page using CDP from a clean temporary page
+   * @param pageUrl - The URL of the page to force close
+   * @returns true if successful, false otherwise
+   */
+  private async _forceClosePageViaCdp(pageUrl: string): Promise<boolean> {
+    const logPageUrl = BrowserSession._redact_url_for_logging(pageUrl);
+    try {
+      if (!this.browser_context) {
+        throw new Error('Browser context is not set up yet');
+      }
+
+      // Create a clean page for CDP operations
+      const tempPage = await Promise.race([
+        this.browser_context.newPage(),
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () => reject(new Error('Timeout creating temp page')),
+            5000
+          )
+        ),
+      ]);
+
+      await Promise.race([
+        tempPage.goto('about:blank'),
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () => reject(new Error('Timeout navigating to blank')),
+            2000
+          )
+        ),
+      ]);
+
+      try {
+        // Create CDP session from the clean page
+        const cdpSession = await Promise.race([
+          this.get_or_create_cdp_session(tempPage),
+          new Promise<never>((_, reject) =>
+            setTimeout(
+              () => reject(new Error('Timeout creating CDP session')),
+              5000
+            )
+          ),
+        ]);
+
+        try {
+          // Get all browser targets
+          const targets = (await Promise.race([
+            cdpSession.send('Target.getTargets'),
+            new Promise<never>((_, reject) =>
+              setTimeout(
+                () => reject(new Error('Timeout getting targets')),
+                2000
+              )
+            ),
+          ])) as any;
+
+          // Find the crashed page target
+          let blockedTargetId: string | null = null;
+          const targetInfos = targets.targetInfos || [];
+          for (const target of targetInfos) {
+            if (target.type === 'page' && target.url === pageUrl) {
+              blockedTargetId = target.targetId;
+              break;
+            }
+          }
+
+          if (blockedTargetId) {
+            // Force close the target
+            this.logger.warning(
+              `🪓 Force-closing crashed page target_id=${blockedTargetId} via CDP: ${logPageUrl}`
+            );
+            await Promise.race([
+              cdpSession.send('Target.closeTarget', {
+                targetId: blockedTargetId,
+              }),
+              new Promise<never>((_, reject) =>
+                setTimeout(
+                  () => reject(new Error('Timeout closing target')),
+                  2000
+                )
+              ),
+            ]);
+            return true;
+          } else {
+            this.logger.debug(
+              `❌ Could not find CDP page target_id to force-close: ${logPageUrl} (concurrency issues?)`
+            );
+            return false;
+          }
+        } finally {
+          try {
+            await Promise.race([
+              cdpSession.detach(),
+              new Promise<void>((resolve) => setTimeout(resolve, 1000)),
+            ]);
+          } catch {
+            // Ignore detach errors
+          }
+        }
+      } finally {
+        await tempPage.close();
+      }
+    } catch (error) {
+      this.logger.error(
+        `❌ Using raw CDP to force-close crashed page failed: ${(error as Error).message}`
+      );
+      return false;
+    }
+  }
+
+  /**
+   * Try to reopen a URL in a new page and check if it's responsive
+   * @param url - The URL to reopen
+   * @param timeoutMs - Navigation timeout in milliseconds
+   * @returns true if successful and responsive, false otherwise
+   */
+  private async _tryReopenUrl(
+    url: string,
+    timeoutMs?: number
+  ): Promise<boolean> {
+    if (
+      !url ||
+      url.startsWith('about:') ||
+      url.startsWith('chrome://') ||
+      url.startsWith('edge://')
+    ) {
+      return false;
+    }
+
+    const timeout =
+      timeoutMs || this.browser_profile.default_navigation_timeout || 6000;
+    const logUrl = BrowserSession._redact_url_for_logging(url);
+
+    const denialReason = this._get_url_access_denial_reason(url);
+    if (denialReason) {
+      this.logger.warning(
+        `Skipping recovery reopen for disallowed URL: ${denialReason}`
+      );
+      return false;
+    }
+
+    try {
+      this.logger.debug(`🔄 Attempting to reload URL that crashed: ${logUrl}`);
+
+      if (!this.browser_context) {
+        throw new Error('Browser context is not set');
+      }
+
+      // Create new page directly to avoid circular dependency
+      const newPage = await this.browser_context.newPage();
+      this._assignAgentCurrentPage(newPage);
+
+      // Update human tab reference if there is no human tab yet
+      if (!this.human_current_page || this.human_current_page.isClosed()) {
+        this.human_current_page = newPage;
+      }
+
+      // Set viewport for new tab
+      if (this.browser_profile.window_size) {
+        await newPage.setViewportSize(this.browser_profile.window_size);
+      }
+
+      // Navigate with timeout
+      try {
+        await Promise.race([
+          newPage.goto(url, { waitUntil: 'load', timeout }),
+          new Promise<never>((_, reject) =>
+            setTimeout(
+              () => reject(new Error('Navigation timeout')),
+              timeout + 500
+            )
+          ),
+        ]);
+      } catch (error) {
+        this.logger.debug(
+          `⚠️ Attempting to reload previously crashed URL ${logUrl} failed again: ${(error as Error).name}`
+        );
+      }
+
+      try {
+        await this._assert_page_url_allowed_or_rollback(newPage, {
+          replace_on_failure: false,
+        });
+      } catch (error) {
+        if (error instanceof URLNotAllowedError) {
+          this.logger.warning(
+            `Skipping recovery reopen after redirect to disallowed URL: ${error.message}`
+          );
+          try {
+            await newPage.close?.();
+          } catch {
+            // Ignore cleanup errors; the page was already reset best effort.
+          }
+          if (this.agent_current_page === newPage) {
+            this._assignAgentCurrentPage(null);
+          }
+          if (this.human_current_page === newPage) {
+            this.human_current_page = null;
+          }
+          return false;
+        }
+        throw error;
+      }
+
+      // Wait a bit for any transient blocking to resolve
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+
+      // Check if the reopened page is responsive
+      const isResponsive = await this._isPageResponsive(newPage, 2.0);
+
+      if (isResponsive) {
+        this.logger.info(
+          `✅ Page recovered and is now responsive after reopening on: ${logUrl}`
+        );
+        return true;
+      } else {
+        this.logger.warning(`⚠️ Reopened page ${logUrl} is still unresponsive`);
+        // Close the unresponsive page before returning
+        try {
+          await this._forceClosePageViaCdp(newPage.url());
+        } catch (error) {
+          this.logger.error(
+            `❌ Failed to close crashed page ${logUrl} via CDP: ${(error as Error).message} (something is very wrong or system is extremely overloaded)`
+          );
+        }
+        this._assignAgentCurrentPage(null); // Clear reference to closed page
+        return false;
+      }
+    } catch (error) {
+      this.logger.error(
+        `❌ Retrying crashed page ${logUrl} failed: ${(error as Error).message}`
+      );
+      return false;
+    }
+  }
+
+  /**
+   * Create a new blank page as a fallback when recovery fails
+   * @param url - The original URL that failed
+   */
+  private async _createBlankFallbackPage(url: string): Promise<void> {
+    this.logger.warning(
+      `⚠️ Resetting to about:blank as fallback because browser is unable to load the original URL without crashing: ${BrowserSession._redact_url_for_logging(
+        url
+      )}`
+    );
+
+    // Close any existing broken page
+    if (this.agent_current_page && !this.agent_current_page.isClosed()) {
+      try {
+        await this.agent_current_page.close();
+      } catch {
+        // Ignore close errors
+      }
+    }
+
+    if (!this.browser_context) {
+      throw new Error('Browser context is not set');
+    }
+
+    // Create fresh page directly (avoid decorated methods to prevent circular dependency)
+    const newPage = await this.browser_context.newPage();
+    this._assignAgentCurrentPage(newPage);
+
+    // Update human tab reference if there is no human tab yet
+    if (!this.human_current_page || this.human_current_page.isClosed()) {
+      this.human_current_page = newPage;
+    }
+
+    // Set viewport for new tab
+    if (this.browser_profile.window_size) {
+      await newPage.setViewportSize(this.browser_profile.window_size);
+    }
+
+    // Navigate to blank
+    try {
+      await newPage.goto('about:blank', { waitUntil: 'load', timeout: 5000 });
+    } catch (error) {
+      this.logger.error(
+        `❌ Failed to navigate to about:blank: ${(error as Error).message} (something is very wrong or system is extremely overloaded)`
+      );
+      throw error;
+    }
+
+    // Verify it's responsive
+    if (!(await this._isPageResponsive(newPage, 1.0))) {
+      throw new BrowserError(
+        'Browser is unable to load any new about:blank pages (something is very wrong or browser is extremely overloaded)'
+      );
+    }
+  }
+
+  /**
+   * Recover from an unresponsive page by closing and reopening it
+   * @param callingMethod - The name of the method that detected the unresponsive page
+   * @param timeoutMs - Navigation timeout in milliseconds
+   */
+  private async _recoverUnresponsivePage(
+    callingMethod: string,
+    timeoutMs?: number
+  ): Promise<void> {
+    this.logger.warning(
+      `⚠️ Page JS engine became unresponsive in ${callingMethod}(), attempting recovery...`
+    );
+    const timeout = Math.min(
+      3000,
+      timeoutMs || this.browser_profile.default_navigation_timeout || 5000
+    );
+
+    // Check if browser connection is still alive
+    if (this.browser && !this.browser.isConnected()) {
+      this.logger.error(
+        '❌ Browser connection lost - browser process may have crashed'
+      );
+      throw new Error(
+        'Browser connection lost - cannot recover unresponsive page'
+      );
+    }
+
+    // Prevent re-entrance
+    if (this._inRecovery) {
+      this.logger.debug(
+        'Already in recovery, skipping nested recovery attempt'
+      );
+      return;
+    }
+
+    this._inRecovery = true;
+    try {
+      // Get current URL before recovery
+      if (!this.agent_current_page) {
+        throw new Error('Agent current page is not set');
+      }
+      const currentUrl = this.agent_current_page.url();
+
+      // Clear page references
+      const blockedPage = this.agent_current_page;
+      this._assignAgentCurrentPage(null);
+      if (blockedPage === this.human_current_page) {
+        this.human_current_page = null;
+      }
+
+      // Force-close the crashed page via CDP
+      this.logger.debug(
+        '🪓 Page Recovery Step 1/3: Force-closing crashed page via CDP...'
+      );
+      await this._forceClosePageViaCdp(currentUrl);
+
+      // Remove the closed page from browser_context.pages by forcing a refresh
+      if (this.browser_context && this.browser_context.pages()) {
+        for (const page of this.browser_context.pages().slice()) {
+          const pageUrl = page.url();
+          if (
+            pageUrl === currentUrl &&
+            !page.isClosed() &&
+            !pageUrl.startsWith('about:') &&
+            !pageUrl.startsWith('chrome://') &&
+            !pageUrl.startsWith('edge://')
+          ) {
+            try {
+              await page.close();
+              this.logger.debug(
+                `🪓 Closed page because it has a known crash-causing URL: ${BrowserSession._redact_url_for_logging(
+                  pageUrl
+                )}`
+              );
+            } catch {
+              // Page might already be closed via CDP
+            }
+          }
+        }
+      }
+
+      // Try to reopen the URL (in case blocking was transient)
+      this.logger.debug(
+        '🍼 Page Recovery Step 2/3: Trying to reopen the URL again...'
+      );
+      if (await this._tryReopenUrl(currentUrl, timeout)) {
+        this.logger.debug(
+          '✅ Page Recovery Step 3/3: Page loading succeeded after 2nd attempt!'
+        );
+        return; // Success!
+      }
+
+      // If that failed, fall back to blank page
+      this.logger.debug(
+        '❌ Page Recovery Step 3/3: Loading the page a 2nd time failed as well, browser seems unable to load this URL without getting stuck, retreating to a safe page...'
+      );
+      await this._createBlankFallbackPage(currentUrl);
+    } finally {
+      // Always clear recovery flag
+      this._inRecovery = false;
+    }
+  }
+
+  // endregion
+
+  // region - Enhanced CSS Selector Generation
+
+  /**
+   * Generate enhanced CSS selector for an element
+   * Handles special characters and provides fallback strategies
+   * @param xpath - XPath of the element
+   * @param element - Optional element node for additional context
+   * @returns Enhanced CSS selector string
+   */
+  private _enhancedCssSelectorForElement(
+    xpath: string,
+    element?: DOMElementNode
+  ): string {
+    // Try to convert XPath to CSS selector
+    const cssSelector = this._xpathToCss(xpath);
+
+    if (cssSelector) {
+      return cssSelector;
+    }
+
+    // Fallback: use element attributes if available
+    if (element) {
+      const selectors: string[] = [];
+
+      // Try ID first (most specific)
+      if (element.attributes?.id) {
+        const id = this._escapeSelector(element.attributes.id as string);
+        selectors.push(`#${id}`);
+      }
+
+      // Try class names
+      if (element.attributes?.class) {
+        const classes = (element.attributes.class as string)
+          .split(/\s+/)
+          .filter((c) => c.length > 0)
+          .map((c) => `.${this._escapeSelector(c)}`)
+          .join('');
+        if (classes) {
+          selectors.push(`${element.tag_name}${classes}`);
+        }
+      }
+
+      // Try name attribute
+      if (element.attributes?.name) {
+        const name = this._escapeSelector(element.attributes.name as string);
+        selectors.push(`${element.tag_name}[name="${name}"]`);
+      }
+
+      // Try data attributes
+      for (const [key, value] of Object.entries(element.attributes || {})) {
+        if (key.startsWith('data-')) {
+          const escaped = this._escapeSelector(String(value));
+          selectors.push(`${element.tag_name}[${key}="${escaped}"]`);
+        }
+      }
+
+      if (selectors.length > 0) {
+        return selectors[0];
+      }
+
+      // Last resort: just the tag name
+      return element.tag_name || 'div';
+    }
+
+    // Ultimate fallback
+    return 'body';
+  }
+
+  /**
+   * Convert XPath to CSS selector
+   * Handles simple XPath expressions
+   */
+  private _xpathToCss(xpath: string): string | null {
+    try {
+      // Remove leading slashes
+      let path = xpath.replace(/^\/+/, '');
+
+      // Handle simple cases like /html/body/div[1]/span[2]
+      const parts = path.split('/');
+      const cssparts: string[] = [];
+
+      for (const part of parts) {
+        // Extract tag and index: div[1] -> {tag: 'div', index: 1}
+        const match = part.match(/^([a-zA-Z0-9_-]+)(?:\[(\d+)\])?$/);
+        if (match) {
+          const [, tag, index] = match;
+          if (index) {
+            // CSS uses nth-of-type (1-indexed like XPath)
+            cssparts.push(`${tag}:nth-of-type(${index})`);
+          } else {
+            cssparts.push(tag);
+          }
+        } else {
+          // Complex XPath, can't convert
+          return null;
+        }
+      }
+
+      return cssparts.join(' > ');
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Escape special characters in CSS selectors
+   * Handles characters that need escaping in CSS
+   */
+  private _escapeSelector(selector: string): string {
+    // Escape special CSS characters
+    return selector.replace(/[!"#$%&'()*+,./:;<=>?@[\\\]^`{|}~]/g, '\\$&');
+  }
+
+  // endregion
+
+  // region - User Data Directory Management
+
+  /**
+   * Prepare user data directory for browser profile
+   * Handles singleton lock conflicts and creates temp profiles if needed
+   */
+  async prepareUserDataDir(userDataDir?: string): Promise<string> {
+    if (!userDataDir) {
+      // Use profile's user data dir or create temp one
+      userDataDir =
+        this.browser_profile.user_data_dir ||
+        (await this._createTempUserDataDir());
+    }
+
+    // Check for singleton lock conflicts
+    const hasConflict = await this._checkForSingletonLockConflict(userDataDir);
+    if (hasConflict) {
+      this.logger.warning(
+        `Singleton lock detected in ${userDataDir}, falling back to temp profile`
+      );
+      userDataDir = await this._fallbackToTempProfile();
+    }
+
+    // Ensure directory exists
+    if (!fs.existsSync(userDataDir)) {
+      ensurePrivateDirectoryIfCreated(userDataDir);
+      this.logger.debug(`Created user data directory: ${userDataDir}`);
+    }
+
+    return userDataDir;
+  }
+
+  /**
+   * Check if user data directory has a singleton lock
+   * This happens when another Chrome instance is using the profile
+   */
+  private async _checkForSingletonLockConflict(
+    userDataDir: string
+  ): Promise<boolean> {
+    try {
+      const singletonLockFile = path.join(userDataDir, 'SingletonLock');
+      const singletonSocketFile = path.join(userDataDir, 'SingletonSocket');
+      const singletonCookieFile = path.join(userDataDir, 'SingletonCookie');
+
+      // Check if any singleton lock files exist
+      if (
+        fs.existsSync(singletonLockFile) ||
+        fs.existsSync(singletonSocketFile) ||
+        fs.existsSync(singletonCookieFile)
+      ) {
+        // Try to detect if process is still alive (Unix-like systems)
+        if (process.platform !== 'win32' && fs.existsSync(singletonLockFile)) {
+          try {
+            // Try to read the lock file to get PID
+            const lockContent = fs.readFileSync(singletonLockFile, 'utf-8');
+            const pidMatch = lockContent.match(/(\d+)/);
+            if (pidMatch) {
+              const pid = parseInt(pidMatch[1], 10);
+              try {
+                // Check if process exists (signal 0 doesn't kill, just checks)
+                process.kill(pid, 0);
+                return true; // Process exists, lock is valid
+              } catch {
+                // Process doesn't exist, stale lock
+                this.logger.debug(`Stale singleton lock detected, removing`);
+                fs.unlinkSync(singletonLockFile);
+                return false;
+              }
+            }
+          } catch {
+            // Couldn't read lock file
+          }
+        }
+        return true;
+      }
+      return false;
+    } catch (error) {
+      this.logger.debug(
+        `Error checking singleton lock: ${(error as Error).message}`
+      );
+      return false;
+    }
+  }
+
+  /**
+   * Fallback to a temporary profile when the primary one is locked
+   */
+  private async _fallbackToTempProfile(): Promise<string> {
+    const tempDir = await this._createTempUserDataDir();
+    this.logger.info(`Using temporary profile: ${tempDir}`);
+    return tempDir;
+  }
+
+  /**
+   * Create a temporary user data directory
+   */
+  private async _createTempUserDataDir(): Promise<string> {
+    const tempDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'browser-use-user-data-dir-')
+    );
+    if (process.platform !== 'win32') {
+      fs.chmodSync(tempDir, 0o700);
+    }
+    return tempDir;
+  }
+
+  // endregion
+
+  // region - Page Visibility Listeners
+
+  /**
+   * Setup listeners for page visibility changes
+   * Tracks when user switches tabs to update human_current_page
+   */
+  private async _setupCurrentPageChangeListeners(): Promise<void> {
+    if (!this.browser_context) {
+      return;
+    }
+
+    // Listen for page events to track which page the user is viewing
+    this.browser_context.on?.('page', (page: Page) => {
+      this.logger.debug(
+        `New page created: ${BrowserSession._redact_url_for_logging(
+          page.url?.() || 'about:blank'
+        )}`
+      );
+
+      // Note: 'visibilitychange' is not a standard Playwright page event
+      // Visibility tracking would need to be implemented differently
+      // (e.g., through page.evaluate polling or browser context events)
+
+      // Track new page
+      if (page.url && !page.url().startsWith('about:')) {
+        this.human_current_page = page;
+      }
+    });
+  }
+
+  /**
+   * Callback when tab visibility changes
+   * Updates human_current_page to reflect which tab the user is viewing
+   */
+  private _onTabVisibilityChange(page: Page): void {
+    try {
+      // Check if page is visible
+      page
+        .evaluate?.(() => document.visibilityState === 'visible')
+        .then((isVisible: boolean) => {
+          if (isVisible) {
+            this.logger.debug(
+              `Tab became visible: ${BrowserSession._redact_url_for_logging(
+                page.url?.() || 'unknown'
+              )}`
+            );
+            this.human_current_page = page;
+          }
+        })
+        .catch(() => {
+          // Ignore errors from closed pages
+        });
+    } catch {
+      // Ignore errors
+    }
+  }
+
+  // endregion
+
+  // region - Process Management
+
+  /**
+   * Normalize pid values before issuing process operations.
+   */
+  private _normalizePid(pid: unknown): number | null {
+    if (!Number.isSafeInteger(pid) || (pid as number) <= 0) {
+      this.logger.debug(
+        `Skipping process operation for invalid pid: ${String(pid)}`
+      );
+      return null;
+    }
+    return pid as number;
+  }
+
+  private _getProcessCommandLine(pid: number): string | null {
+    return getProcessCommandLine(pid);
+  }
+
+  private _isOwnedBrowserProcess(pid: number): boolean {
+    const token = this._browserLaunchToken;
+    if (!token) {
+      return false;
+    }
+    return Boolean(
+      this._getProcessCommandLine(pid)?.includes(
+        `--browser-use-session-token=${token}`
+      )
+    );
+  }
+
+  /**
+   * Kill all child processes spawned by this browser session
+   */
+  private async _killChildProcesses(): Promise<void> {
+    if (this._childProcesses.size === 0) {
+      return;
+    }
+
+    this.logger.debug(`Killing ${this._childProcesses.size} child processes`);
+
+    for (const trackedPid of this._childProcesses) {
+      const pid = this._normalizePid(trackedPid);
+      if (!pid) {
+        continue;
+      }
+
+      try {
+        process.kill(pid, 'SIGTERM');
+        this.logger.debug(`Sent SIGTERM to process ${pid}`);
+
+        await new Promise((resolve) => setTimeout(resolve, 500));
+
+        try {
+          process.kill(pid, 0);
+          process.kill(pid, 'SIGKILL');
+          this.logger.debug(`Sent SIGKILL to process ${pid}`);
+        } catch {
+          // Process is dead, ignore
+        }
+      } catch (error) {
+        this.logger.debug(
+          `Could not kill process ${pid}: ${(error as Error).message}`
+        );
+      }
+    }
+
+    this._childProcesses.clear();
+  }
+
+  /**
+   * Terminate the browser process and all its children
+   */
+  private async _terminateBrowserProcess(): Promise<void> {
+    const browserPid = this._normalizePid(this.browser_pid);
+    if (!browserPid) {
+      return;
+    }
+
+    if (!this._isOwnedBrowserProcess(browserPid)) {
+      this.logger.debug(
+        `Skipping termination for unverified browser process ${browserPid}`
+      );
+      return;
+    }
+
+    try {
+      this.logger.debug(`Terminating browser process ${browserPid}`);
+
+      if (process.platform === 'win32') {
+        await execFileAsync('taskkill', [
+          '/PID',
+          String(browserPid),
+          '/T',
+          '/F',
+        ]).catch(() => {
+          // Ignore errors if process already dead
+        });
+      } else {
+        try {
+          process.kill(-browserPid, 'SIGTERM');
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+
+          if (!this._isOwnedBrowserProcess(browserPid)) {
+            return;
+          }
+          try {
+            process.kill(-browserPid, 0);
+            process.kill(-browserPid, 'SIGKILL');
+          } catch {
+            // Process is dead
+          }
+        } catch {
+          try {
+            if (!this._isOwnedBrowserProcess(browserPid)) {
+              return;
+            }
+            process.kill(browserPid, 'SIGTERM');
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+            if (!this._isOwnedBrowserProcess(browserPid)) {
+              return;
+            }
+            process.kill(browserPid, 'SIGKILL');
+          } catch {
+            // Process doesn't exist
+          }
+        }
+      }
+    } catch (error) {
+      this.logger.debug(
+        `Error terminating browser process: ${(error as Error).message}`
+      );
+    }
+  }
+
+  /**
+   * Get child processes of a given PID
+   * Cross-platform implementation using ps on Unix-like systems and WMIC on Windows
+   */
+  private async _getChildProcesses(pid: number): Promise<number[]> {
+    const normalizedPid = this._normalizePid(pid);
+    if (!normalizedPid) {
+      return [];
+    }
+
+    try {
+      if (process.platform === 'win32') {
+        const { stdout } = await execFileAsync('wmic', [
+          'process',
+          'where',
+          `ParentProcessId=${normalizedPid}`,
+          'get',
+          'ProcessId',
+        ]);
+        const pids = stdout
+          .split('\n')
+          .slice(1)
+          .map((line) => parseInt(line.trim(), 10))
+          .filter((p) => Number.isFinite(p));
+        return pids;
+      }
+
+      const { stdout } = await execFileAsync('ps', [
+        '-o',
+        'pid=',
+        '--ppid',
+        String(normalizedPid),
+      ]);
+      const pids = stdout
+        .split('\n')
+        .map((line) => parseInt(line.trim(), 10))
+        .filter((p) => Number.isFinite(p));
+      return pids;
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Track a child process
+   */
+  private _trackChildProcess(pid: number): void {
+    const normalizedPid = this._normalizePid(pid);
+    if (normalizedPid) {
+      this._childProcesses.add(normalizedPid);
+    }
+  }
+
+  /**
+   * Untrack a child process
+   */
+  private _untrackChildProcess(pid: number): void {
+    const normalizedPid = this._normalizePid(pid);
+    if (normalizedPid) {
+      this._childProcesses.delete(normalizedPid);
+    }
+  }
+
+  // region: Loading Animations
+
+  /**
+   * Show DVD screensaver loading animation
+   * Returns a function to stop the animation
+   *
+   * @param message - Message to display (default: 'Loading...')
+   * @param fps - Frames per second (default: 10)
+   * @returns Function to stop the animation
+   *
+   * @example
+   * const stopAnimation = this._showDvdScreensaverLoadingAnimation('Loading page...');
+   * await someLongOperation();
+   * stopAnimation();
+   */
+  _showDvdScreensaverLoadingAnimation(
+    message: string = 'Loading...',
+    fps: number = 10
+  ): () => void {
+    return showDVDScreensaver(message, fps);
+  }
+
+  /**
+   * Show simple spinner loading animation
+   * Returns a function to stop the animation
+   *
+   * @param message - Message to display (default: 'Loading...')
+   * @param fps - Frames per second (default: 10)
+   * @returns Function to stop the animation
+   *
+   * @example
+   * const stopSpinner = this._showSpinnerLoadingAnimation('Processing...');
+   * await someLongOperation();
+   * stopSpinner();
+   */
+  _showSpinnerLoadingAnimation(
+    message: string = 'Loading...',
+    fps: number = 10
+  ): () => void {
+    return showSpinner(message, fps);
+  }
+
+  /**
+   * Execute an async operation with DVD screensaver animation
+   *
+   * @param operation - Async operation to execute
+   * @param message - Message to display during operation
+   * @returns Result of the operation
+   *
+   * @example
+   * const page = await this._withDvdScreensaver(
+   *   async () => await this.browser_context!.newPage(),
+   *   'Opening new page...'
+   * );
+   */
+  async _withDvdScreensaver<T>(
+    operation: () => Promise<T>,
+    message: string = 'Loading...'
+  ): Promise<T> {
+    return withDVDScreensaver(operation, message);
+  }
+
+  // endregion: Loading Animations
+
+  // endregion
+}
+
+export { DEFAULT_BROWSER_PROFILE };

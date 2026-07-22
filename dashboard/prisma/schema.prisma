@@ -1,0 +1,152 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum AgentStatus {
+  ACTIVE
+  PAUSED
+  FAILED
+  COMPLETED
+}
+
+enum ScheduleType {
+  MANUAL
+  DAILY
+  WEEKLY
+}
+
+enum RunStatus {
+  QUEUED
+  RUNNING
+  SUCCESS
+  FAILED
+  CANCELED
+}
+
+enum AgentEventType {
+  RUN_CREATED
+  RUN_STARTED
+  STEP_STARTED
+  STEP_COMPLETED
+  STEP_FAILED
+  RUN_COMPLETED
+  RUN_FAILED
+  SYSTEM
+}
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  name          String?
+  emailVerified Boolean   @default(false)
+  image         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  accounts      Account[]
+  sessions      Session[]
+  agents        Agent[]
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  expiresAt DateTime
+  token     String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  ipAddress String?
+  userAgent String?
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Account {
+  id                    String    @id @default(cuid())
+  accountId             String
+  providerId            String
+  userId                String
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([providerId, accountId])
+  @@index([userId])
+}
+
+model Verification {
+  id         String    @id @default(cuid())
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime? @default(now())
+  updatedAt  DateTime? @updatedAt
+
+  @@unique([identifier, value])
+}
+
+model Agent {
+  id             String       @id @default(cuid())
+  userId         String
+  name           String
+  description    String?
+  goal           String
+  targetWebsite  String
+  status         AgentStatus  @default(PAUSED)
+  scheduleType   ScheduleType @default(MANUAL)
+  scheduleConfig Json?
+  configuration  Json
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  lastRunAt      DateTime?
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  runs           Run[]
+
+  @@index([userId])
+  @@index([userId, status])
+  @@index([createdAt])
+}
+
+model Run {
+  id           String       @id @default(cuid())
+  agentId      String
+  status       RunStatus    @default(QUEUED)
+  startedAt    DateTime     @default(now())
+  completedAt  DateTime?
+  duration     Int?
+  result       Json?
+  errorMessage String?
+  createdAt    DateTime     @default(now())
+  agent        Agent        @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  events       AgentEvent[]
+
+  @@index([agentId])
+  @@index([status])
+  @@index([startedAt])
+  @@index([agentId, startedAt])
+}
+
+model AgentEvent {
+  id        String         @id @default(cuid())
+  runId     String
+  type      AgentEventType
+  message   String
+  timestamp DateTime       @default(now())
+  run       Run            @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([runId])
+  @@index([runId, timestamp])
+  @@index([type])
+}

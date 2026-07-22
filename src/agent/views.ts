@@ -1,0 +1,2084 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { createHash } from 'node:crypto';
+import { ActionModel } from '../controller/registry/views.js';
+import { BrowserStateHistory } from '../browser/views.js';
+import type { DOMHistoryElement } from '../dom/history-tree-processor/view.js';
+import { HistoryTreeProcessor } from '../dom/history-tree-processor/service.js';
+import {
+  DEFAULT_INCLUDE_ATTRIBUTES,
+  type DOMElementNode,
+  type SelectorMap,
+} from '../dom/views.js';
+import type { FileSystemState } from '../filesystem/file-system.js';
+import type { BaseChatModel } from '../llm/base.js';
+import { MessageManagerState } from './message-manager/views.js';
+import type { UsageSummary } from '../tokens/views.js';
+import {
+  readBoundedPrivateFile,
+  writePrivateFileAtomic,
+} from '../private-state.js';
+
+// Re-export ActionModel for agent/service.ts
+export { ActionModel };
+
+export interface StructuredOutputParser<T = unknown> {
+  parse?: (input: string) => T;
+  model_validate_json?: (input: string) => T;
+  model_json_schema?: () => unknown;
+  schema?: unknown;
+}
+
+type SensitiveDataMap = Record<string, string | Record<string, string>>;
+export const MAX_AGENT_HISTORY_FILE_BYTES = 64 * 1024 * 1024;
+export const MAX_REDACTED_TEXT_CHARS = 16 * 1024 * 1024;
+export const MAX_LOADED_AGENT_HISTORY_ITEMS = 100_000;
+const MAX_SENSITIVE_PLACEHOLDERS = 1_024;
+const MAX_SENSITIVE_PATTERN_CHARS = 256 * 1024;
+const MAX_SENSITIVE_SECRET_CHARS = 64 * 1024;
+const MAX_SENSITIVE_KEY_CHARS = 256;
+const MAX_AGENT_HISTORY_VALUE_DEPTH = 100;
+const MAX_AGENT_HISTORY_VALUE_ENTRIES = 100_000;
+const MAX_ACTION_HASH_DEPTH = 50;
+const MAX_ACTION_HASH_ENTRIES = 10_000;
+const MAX_ACTION_HASH_SERIALIZED_CHARS = 128 * 1024;
+const MAX_ACTION_HASH_FIELD_CHARS = 64 * 1024;
+const MAX_ACTION_HASH_NAME_CHARS = 512;
+const MAX_HISTORY_SCREENSHOT_FILES = 100;
+const MAX_HISTORY_SCREENSHOT_TOTAL_BYTES = 20 * 1024 * 1024;
+export const MAX_ACTION_LOOP_WINDOW = 10_000;
+const MAX_PAGE_FINGERPRINTS = 5;
+const MAX_PAGE_FINGERPRINT_URL_CHARS = 16 * 1024;
+const MAX_PAGE_FINGERPRINT_HASH_CHARS = 128;
+const MAX_STAGNANT_PAGE_COUNT = 1_000_000;
+const MAX_LOADED_ACTIONS_PER_HISTORY_ITEM = 1_000;
+const MAX_LOADED_RESULTS_PER_HISTORY_ITEM = 1_000;
+const MAX_LOADED_STATE_COLLECTION_ITEMS = 10_000;
+
+const isHistoryRecord = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === 'object' && !Array.isArray(value);
+
+const requireHistoryRecord = (value: unknown, label: string) => {
+  if (!isHistoryRecord(value)) {
+    throw new TypeError(`${label} must be an object`);
+  }
+  return value;
+};
+
+const requireHistoryArray = (
+  value: unknown,
+  label: string,
+  maxItems: number
+): unknown[] => {
+  if (!Array.isArray(value)) {
+    throw new TypeError(`${label} must be an array`);
+  }
+  if (value.length > maxItems) {
+    throw new RangeError(`${label} must contain at most ${maxItems} items`);
+  }
+  return value;
+};
+
+const requireNullableHistoryString = (value: unknown, label: string) => {
+  if (value == null) return null;
+  if (typeof value !== 'string') {
+    throw new TypeError(`${label} must be a string or null`);
+  }
+  return value;
+};
+
+const requireNullableHistoryBoolean = (value: unknown, label: string) => {
+  if (value == null) return null;
+  if (typeof value !== 'boolean') {
+    throw new TypeError(`${label} must be a boolean or null`);
+  }
+  return value;
+};
+
+const requireFiniteHistoryNumber = (value: unknown, label: string) => {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new TypeError(`${label} must be a finite number`);
+  }
+  return value;
+};
+
+const validateHistoryRecordItems = (items: unknown[], label: string) => {
+  items.forEach((item, index) => {
+    requireHistoryRecord(item, `${label}[${index}]`);
+  });
+};
+
+const validateHistoryStringItems = (items: unknown[], label: string) => {
+  items.forEach((item, index) => {
+    if (typeof item !== 'string') {
+      throw new TypeError(`${label}[${index}] must be a string`);
+    }
+  });
+};
+
+export const redactSensitiveDataFromString = (
+  value: string,
+  sensitive_data: SensitiveDataMap | null,
+  maxOutputChars = MAX_REDACTED_TEXT_CHARS
+) => {
+  if (!sensitive_data) {
+    return value;
+  }
+
+  const boundedMaxOutputChars =
+    Number.isFinite(maxOutputChars) && maxOutputChars >= 0
+      ? Math.floor(maxOutputChars)
+      : MAX_REDACTED_TEXT_CHARS;
+  const failClosed = () => '<redacted>'.slice(0, boundedMaxOutputChars);
+  const placeholders = new Map<string, string>();
+  let patternChars = 0;
+  const addPlaceholder = (rawKey: string, secret: string) => {
+    if (!secret || placeholders.has(secret)) return true;
+    if (
+      secret.length > MAX_SENSITIVE_SECRET_CHARS ||
+      placeholders.size >= MAX_SENSITIVE_PLACEHOLDERS ||
+      patternChars + secret.length > MAX_SENSITIVE_PATTERN_CHARS
+    ) {
+      return false;
+    }
+    const key = rawKey
+      .slice(0, MAX_SENSITIVE_KEY_CHARS)
+      .replace(/[^a-zA-Z0-9_.: -]/g, '_');
+    placeholders.set(secret, key || 'value');
+    patternChars += secret.length;
+    return true;
+  };
+
+  for (const [keyOrDomain, content] of Object.entries(sensitive_data)) {
+    if (typeof content === 'string' && content) {
+      if (!addPlaceholder(keyOrDomain, content)) return failClosed();
+    } else if (content && typeof content === 'object') {
+      for (const [key, val] of Object.entries(content)) {
+        if (typeof val === 'string' && val) {
+          if (!addPlaceholder(key, val)) return failClosed();
+        }
+      }
+    }
+  }
+
+  const entries = [...placeholders.entries()].sort(
+    ([left], [right]) => right.length - left.length
+  );
+  if (!entries.length) {
+    return value;
+  }
+
+  let matcher: RegExp;
+  try {
+    matcher = new RegExp(
+      entries
+        .map(([secret]) => secret.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+        .join('|'),
+      'g'
+    );
+  } catch {
+    return failClosed();
+  }
+
+  const keysBySecret = new Map(entries);
+  const output: string[] = [];
+  let remaining = boundedMaxOutputChars;
+  let offset = 0;
+  const append = (chunk: string) => {
+    if (!chunk || remaining <= 0) return;
+    const bounded = chunk.slice(0, remaining);
+    output.push(bounded);
+    remaining -= bounded.length;
+  };
+
+  let match: RegExpExecArray | null;
+  while (remaining > 0 && (match = matcher.exec(value)) !== null) {
+    append(value.slice(offset, match.index));
+    if (remaining <= 0) break;
+    const key = keysBySecret.get(match[0]) ?? 'value';
+    append(`<secret>${key}</secret>`);
+    offset = match.index + match[0].length;
+  }
+  if (remaining > 0) append(value.slice(offset));
+  return output.join('');
+};
+
+const ensurePrivateDirectoryIfCreated = (dirPath: string) => {
+  const existed = fs.existsSync(dirPath);
+  fs.mkdirSync(dirPath, { recursive: true, mode: 0o700 });
+  if (!existed && process.platform !== 'win32') {
+    fs.chmodSync(dirPath, 0o700);
+  }
+};
+
+const parseStructuredOutput = <T>(
+  schema: StructuredOutputParser<T> | null | undefined,
+  value: string
+): T | null => {
+  if (!schema) {
+    return null;
+  }
+  if (schema.parse) {
+    return schema.parse(value);
+  }
+  if (schema.model_validate_json) {
+    return schema.model_validate_json(value);
+  }
+  return null;
+};
+
+export interface ActionResultInit {
+  is_done?: boolean | null;
+  success?: boolean | null;
+  judgement?: Record<string, unknown> | null;
+  error?: string | null;
+  attachments?: string[] | null;
+  images?: Array<Record<string, unknown>> | null;
+  metadata?: Record<string, unknown> | null;
+  long_term_memory?: string | null;
+  extracted_content?: string | null;
+  include_extracted_content_only_once?: boolean;
+  include_in_memory?: boolean;
+}
+
+export class ActionResult {
+  is_done: boolean | null;
+  success: boolean | null;
+  judgement: Record<string, unknown> | null;
+  error: string | null;
+  attachments: string[] | null;
+  images: Array<Record<string, unknown>> | null;
+  metadata: Record<string, unknown> | null;
+  long_term_memory: string | null;
+  extracted_content: string | null;
+  include_extracted_content_only_once: boolean;
+  include_in_memory: boolean;
+
+  constructor(init: ActionResultInit = {}) {
+    this.is_done = init.is_done ?? false;
+    this.success = init.success ?? null;
+    this.judgement = init.judgement ?? null;
+    this.error = init.error ?? null;
+    this.attachments = init.attachments ?? null;
+    this.images = init.images ?? null;
+    this.metadata = init.metadata ?? null;
+    this.long_term_memory = init.long_term_memory ?? null;
+    this.extracted_content = init.extracted_content ?? null;
+    this.include_extracted_content_only_once =
+      init.include_extracted_content_only_once ?? false;
+    this.include_in_memory = init.include_in_memory ?? false;
+    this.validate();
+  }
+
+  private validate() {
+    if (this.success === true && this.is_done !== true) {
+      throw new Error(
+        'success=True can only be set when is_done=True. For regular actions that succeed, leave success as None. Use success=False only for actions that fail.'
+      );
+    }
+  }
+
+  toJSON() {
+    return {
+      is_done: this.is_done,
+      success: this.success,
+      judgement: this.judgement,
+      error: this.error,
+      attachments: this.attachments,
+      images: this.images,
+      metadata: this.metadata,
+      long_term_memory: this.long_term_memory,
+      extracted_content: this.extracted_content,
+      include_extracted_content_only_once:
+        this.include_extracted_content_only_once,
+      include_in_memory: this.include_in_memory,
+    };
+  }
+
+  model_dump() {
+    return this.toJSON();
+  }
+
+  model_dump_json() {
+    return JSON.stringify(this.toJSON());
+  }
+}
+
+export class PageFingerprint {
+  constructor(
+    public readonly url: string,
+    public readonly element_count: number,
+    public readonly text_hash: string
+  ) {}
+
+  static from_browser_state(
+    url: string,
+    dom_text: string,
+    element_count: number
+  ) {
+    const text_hash = createHash('sha256')
+      .update(dom_text, 'utf8')
+      .digest('hex')
+      .slice(0, 16);
+    return new PageFingerprint(url, element_count, text_hash);
+  }
+
+  equals(other: PageFingerprint) {
+    return (
+      this.url === other.url &&
+      this.element_count === other.element_count &&
+      this.text_hash === other.text_hash
+    );
+  }
+}
+
+const stableSerialize = (
+  root: unknown,
+  maxOutputChars = MAX_ACTION_HASH_SERIALIZED_CHARS
+): string => {
+  const outputLimit =
+    Number.isSafeInteger(maxOutputChars) && maxOutputChars > 0
+      ? Math.min(maxOutputChars, MAX_ACTION_HASH_SERIALIZED_CHARS)
+      : MAX_ACTION_HASH_SERIALIZED_CHARS;
+  const chunks: string[] = [];
+  const activeObjects = new WeakSet<object>();
+  let outputLength = 0;
+  let entriesVisited = 0;
+  let truncated = false;
+
+  const append = (value: string) => {
+    const remaining = outputLimit - outputLength;
+    if (remaining <= 0) {
+      truncated = true;
+      return;
+    }
+    const bounded = value.slice(0, remaining);
+    chunks.push(bounded);
+    outputLength += bounded.length;
+    if (bounded.length < value.length) truncated = true;
+  };
+
+  const consumeEntry = () => {
+    if (entriesVisited >= MAX_ACTION_HASH_ENTRIES) {
+      append('[Truncated]');
+      truncated = true;
+      return false;
+    }
+    entriesVisited += 1;
+    return true;
+  };
+
+  const appendString = (value: string, prefix: string) => {
+    append(`${prefix}${value.length}:`);
+    append(value.slice(0, MAX_ACTION_HASH_FIELD_CHARS));
+    if (value.length > MAX_ACTION_HASH_FIELD_CHARS) append('[FieldTruncated]');
+  };
+
+  const visit = (value: unknown, depth: number): void => {
+    if (truncated) return;
+    if (value === null) {
+      append('null');
+      return;
+    }
+    if (value === undefined) {
+      append('undefined');
+      return;
+    }
+    if (typeof value === 'string') {
+      appendString(value, 's');
+      return;
+    }
+    if (typeof value === 'number') {
+      append(`n:${Object.is(value, -0) ? '-0' : String(value)}`);
+      return;
+    }
+    if (typeof value === 'boolean') {
+      append(value ? 'b:1' : 'b:0');
+      return;
+    }
+    if (typeof value === 'bigint') {
+      append('bigint');
+      return;
+    }
+    if (typeof value === 'symbol' || typeof value === 'function') {
+      append(`[${typeof value}]`);
+      return;
+    }
+    if (depth >= MAX_ACTION_HASH_DEPTH) {
+      append('[MaxDepth]');
+      return;
+    }
+    if (activeObjects.has(value)) {
+      append('[Circular]');
+      return;
+    }
+
+    activeObjects.add(value);
+    try {
+      if (ArrayBuffer.isView(value)) {
+        append(`[Binary:${value.byteLength}]`);
+        return;
+      }
+      if (value instanceof ArrayBuffer) {
+        append(`[Binary:${value.byteLength}]`);
+        return;
+      }
+      if (value instanceof Date) {
+        append(
+          `date:${Number.isNaN(value.getTime()) ? 'invalid' : value.getTime()}`
+        );
+        return;
+      }
+      if (Array.isArray(value)) {
+        append('[');
+        let index = 0;
+        while (index < value.length && !truncated) {
+          if (!consumeEntry()) break;
+          if (index > 0) append(',');
+          append(`${index}:`);
+          const descriptor = Object.getOwnPropertyDescriptor(
+            value,
+            String(index)
+          );
+          if (!descriptor) {
+            append('[Hole]');
+          } else if ('value' in descriptor) {
+            visit(descriptor.value, depth + 1);
+          } else {
+            append('[Accessor]');
+          }
+          index += 1;
+        }
+        if (index < value.length && !truncated) {
+          append('[Truncated]');
+          truncated = true;
+        }
+        append(']');
+        return;
+      }
+
+      const record = value as Record<string, unknown>;
+      const entries: Array<{
+        key: string;
+        sortKey: string;
+        descriptor: PropertyDescriptor;
+      }> = [];
+      let collectedKeyChars = 0;
+      let collectionTruncated = false;
+      for (const key in record) {
+        if (!Object.prototype.hasOwnProperty.call(record, key)) continue;
+        if (entries.length >= MAX_ACTION_HASH_ENTRIES - entriesVisited) {
+          collectionTruncated = true;
+          break;
+        }
+        const descriptor = Object.getOwnPropertyDescriptor(record, key);
+        if (!descriptor?.enumerable) continue;
+        const sortKey = key.slice(0, MAX_ACTION_HASH_FIELD_CHARS);
+        if (collectedKeyChars + sortKey.length > outputLimit) {
+          collectionTruncated = true;
+          break;
+        }
+        collectedKeyChars += sortKey.length;
+        entries.push({ key, sortKey, descriptor });
+      }
+      entries.sort(
+        (left, right) =>
+          left.sortKey.localeCompare(right.sortKey) ||
+          left.key.length - right.key.length
+      );
+      append('{');
+      for (let index = 0; index < entries.length && !truncated; index += 1) {
+        if (!consumeEntry()) break;
+        if (index > 0) append(',');
+        const { key, descriptor } = entries[index]!;
+        appendString(key, 'k');
+        append(':');
+        if ('value' in descriptor) {
+          visit(descriptor.value, depth + 1);
+        } else {
+          append('[Accessor]');
+        }
+      }
+      if (collectionTruncated && !truncated) {
+        append('[Truncated]');
+        truncated = true;
+      }
+      append('}');
+    } catch {
+      append('[Unreadable]');
+    } finally {
+      activeObjects.delete(value);
+    }
+  };
+
+  visit(root, 0);
+  const serialized = chunks.join('');
+  if (!truncated) return serialized;
+  const marker = '[Truncated]'.slice(0, outputLimit);
+  return `${serialized.slice(0, Math.max(0, outputLimit - marker.length))}${marker}`;
+};
+
+const boundedActionHashString = (value: unknown, maxChars: number) => {
+  if (value === null || value === undefined) return '';
+  if (
+    typeof value !== 'string' &&
+    typeof value !== 'number' &&
+    typeof value !== 'boolean'
+  ) {
+    return `[${typeof value}]`;
+  }
+  const normalized = String(value);
+  if (normalized.length <= maxChars) return normalized;
+  return `${normalized.slice(0, maxChars)}[Truncated:${normalized.length}]`;
+};
+
+const normalizeActionForHash = (
+  action_name: string,
+  params: Record<string, unknown>
+) => {
+  action_name = boundedActionHashString(
+    action_name,
+    MAX_ACTION_HASH_NAME_CHARS
+  );
+  if (action_name === 'search' || action_name === 'search_google') {
+    const query = boundedActionHashString(
+      params.query,
+      MAX_ACTION_HASH_FIELD_CHARS
+    );
+    const tokens = Array.from(
+      new Set(
+        query
+          .toLowerCase()
+          .replace(/[^\w\s]/g, ' ')
+          .split(/\s+/)
+          .filter(Boolean)
+      )
+    ).sort();
+    const boundedEngine = boundedActionHashString(params.engine, 256);
+    const engine = boundedEngine.trim()
+      ? boundedEngine.trim().toLowerCase()
+      : action_name === 'search_google'
+        ? 'google'
+        : 'google';
+    return `search|${engine}|${tokens.join('|')}`;
+  }
+
+  if (
+    action_name === 'click' ||
+    action_name === 'click_element' ||
+    action_name === 'click_element_by_index'
+  ) {
+    return `click|${boundedActionHashString(params.index, 128)}`;
+  }
+
+  if (action_name === 'input' || action_name === 'input_text') {
+    const text = boundedActionHashString(
+      params.text,
+      MAX_ACTION_HASH_FIELD_CHARS
+    )
+      .trim()
+      .toLowerCase();
+    return `input|${boundedActionHashString(params.index, 128)}|${text}`;
+  }
+
+  if (action_name === 'navigate' || action_name === 'go_to_url') {
+    return `navigate|${boundedActionHashString(params.url, MAX_ACTION_HASH_FIELD_CHARS)}`;
+  }
+
+  if (action_name.startsWith('scroll')) {
+    const direction =
+      typeof params.down === 'boolean'
+        ? params.down
+          ? 'down'
+          : 'up'
+        : action_name.includes('up')
+          ? 'up'
+          : 'down';
+    const index = boundedActionHashString(params.index, 128);
+    return `scroll|${direction}|${index}`;
+  }
+
+  return `${action_name}|${stableSerialize(params)}`;
+};
+
+export const compute_action_hash = (
+  action_name: string,
+  params: Record<string, unknown>
+) => {
+  let normalized: string;
+  try {
+    normalized = normalizeActionForHash(action_name, params);
+  } catch {
+    normalized = `${boundedActionHashString(action_name, MAX_ACTION_HASH_NAME_CHARS)}|[Unreadable]`;
+  }
+  return createHash('sha256')
+    .update(normalized, 'utf8')
+    .digest('hex')
+    .slice(0, 12);
+};
+
+export class ActionLoopDetector {
+  window_size: number;
+  recent_action_hashes: string[];
+  recent_page_fingerprints: PageFingerprint[];
+  max_repetition_count: number;
+  most_repeated_hash: string | null;
+  consecutive_stagnant_pages: number;
+
+  constructor(init?: Partial<ActionLoopDetector>) {
+    const requestedWindow = init?.window_size;
+    this.window_size =
+      Number.isSafeInteger(requestedWindow) &&
+      (requestedWindow as number) >= 1 &&
+      (requestedWindow as number) <= MAX_ACTION_LOOP_WINDOW
+        ? (requestedWindow as number)
+        : 20;
+    this.recent_action_hashes = Array.isArray(init?.recent_action_hashes)
+      ? init.recent_action_hashes
+          .filter(
+            (hash): hash is string =>
+              typeof hash === 'string' && /^[a-f0-9]{12}$/.test(hash)
+          )
+          .slice(-this.window_size)
+      : [];
+    this.recent_page_fingerprints = Array.isArray(
+      init?.recent_page_fingerprints
+    )
+      ? init.recent_page_fingerprints
+          .flatMap((candidate) => {
+            if (!candidate || typeof candidate !== 'object') return [];
+            const value = candidate as unknown as Record<string, unknown>;
+            const url =
+              typeof value.url === 'string'
+                ? value.url.slice(0, MAX_PAGE_FINGERPRINT_URL_CHARS)
+                : '';
+            const elementCount =
+              Number.isSafeInteger(value.element_count) &&
+              (value.element_count as number) >= 0
+                ? (value.element_count as number)
+                : 0;
+            const textHash =
+              typeof value.text_hash === 'string'
+                ? value.text_hash.slice(0, MAX_PAGE_FINGERPRINT_HASH_CHARS)
+                : '';
+            return [new PageFingerprint(url, elementCount, textHash)];
+          })
+          .slice(-MAX_PAGE_FINGERPRINTS)
+      : [];
+    this.max_repetition_count = 0;
+    this.most_repeated_hash = null;
+    this.consecutive_stagnant_pages =
+      Number.isSafeInteger(init?.consecutive_stagnant_pages) &&
+      (init?.consecutive_stagnant_pages as number) >= 0 &&
+      (init?.consecutive_stagnant_pages as number) <= MAX_STAGNANT_PAGE_COUNT
+        ? (init?.consecutive_stagnant_pages as number)
+        : 0;
+    this.update_repetition_stats();
+  }
+
+  set_window_size(windowSize: number) {
+    if (
+      !Number.isSafeInteger(windowSize) ||
+      windowSize < 1 ||
+      windowSize > MAX_ACTION_LOOP_WINDOW
+    ) {
+      throw new RangeError(
+        `window_size must be an integer between 1 and ${MAX_ACTION_LOOP_WINDOW}`
+      );
+    }
+    this.window_size = windowSize;
+    if (this.recent_action_hashes.length > windowSize) {
+      this.recent_action_hashes = this.recent_action_hashes.slice(-windowSize);
+    }
+    this.update_repetition_stats();
+  }
+
+  record_action(action_name: string, params: Record<string, unknown>) {
+    const hash = compute_action_hash(action_name, params);
+    this.recent_action_hashes.push(hash);
+    if (this.recent_action_hashes.length > this.window_size) {
+      this.recent_action_hashes = this.recent_action_hashes.slice(
+        -this.window_size
+      );
+    }
+    this.update_repetition_stats();
+  }
+
+  record_page_state(url: string, dom_text: string, element_count: number) {
+    const fp = PageFingerprint.from_browser_state(url, dom_text, element_count);
+    const last = this.recent_page_fingerprints.at(-1);
+    if (last && last.equals(fp)) {
+      this.consecutive_stagnant_pages = Math.min(
+        MAX_STAGNANT_PAGE_COUNT,
+        this.consecutive_stagnant_pages + 1
+      );
+    } else {
+      this.consecutive_stagnant_pages = 0;
+    }
+    this.recent_page_fingerprints.push(fp);
+    if (this.recent_page_fingerprints.length > MAX_PAGE_FINGERPRINTS) {
+      this.recent_page_fingerprints = this.recent_page_fingerprints.slice(
+        -MAX_PAGE_FINGERPRINTS
+      );
+    }
+  }
+
+  private update_repetition_stats() {
+    if (!this.recent_action_hashes.length) {
+      this.max_repetition_count = 0;
+      this.most_repeated_hash = null;
+      return;
+    }
+    const counts = new Map<string, number>();
+    for (const hash of this.recent_action_hashes) {
+      counts.set(hash, (counts.get(hash) ?? 0) + 1);
+    }
+    let maxHash: string | null = null;
+    let maxCount = 0;
+    for (const [hash, count] of counts.entries()) {
+      if (count > maxCount) {
+        maxHash = hash;
+        maxCount = count;
+      }
+    }
+    this.most_repeated_hash = maxHash;
+    this.max_repetition_count = maxCount;
+  }
+
+  get_nudge_message() {
+    const messages: string[] = [];
+
+    if (this.max_repetition_count >= 12) {
+      messages.push(
+        `Heads up: you have repeated a similar action ${this.max_repetition_count} times in the last ${this.recent_action_hashes.length} actions. If you are making progress with each repetition, keep going. If not, a different approach might get you there faster.`
+      );
+    } else if (this.max_repetition_count >= 8) {
+      messages.push(
+        `Heads up: you have repeated a similar action ${this.max_repetition_count} times in the last ${this.recent_action_hashes.length} actions. Are you still making progress with each attempt? If so, carry on. Otherwise, it might be worth trying a different approach.`
+      );
+    } else if (this.max_repetition_count >= 5) {
+      messages.push(
+        `Heads up: you have repeated a similar action ${this.max_repetition_count} times in the last ${this.recent_action_hashes.length} actions. If this is intentional and making progress, carry on. If not, it might be worth reconsidering your approach.`
+      );
+    }
+
+    if (this.consecutive_stagnant_pages >= 5) {
+      messages.push(
+        `The page content has not changed across ${this.consecutive_stagnant_pages} consecutive actions. Your actions might not be having the intended effect. It could be worth trying a different element or approach.`
+      );
+    }
+
+    if (!messages.length) {
+      return null;
+    }
+    return messages.join('\n\n');
+  }
+}
+
+export interface MessageCompactionSettings {
+  enabled: boolean;
+  compact_every_n_steps: number;
+  trigger_char_count: number | null;
+  trigger_token_count: number | null;
+  chars_per_token: number;
+  keep_last_items: number;
+  summary_max_chars: number;
+  include_read_state: boolean;
+  compaction_llm: BaseChatModel | null;
+}
+
+export const defaultMessageCompactionSettings =
+  (): MessageCompactionSettings => ({
+    enabled: true,
+    compact_every_n_steps: 15,
+    trigger_char_count: 40000,
+    trigger_token_count: null,
+    chars_per_token: 4,
+    keep_last_items: 6,
+    summary_max_chars: 6000,
+    include_read_state: false,
+    compaction_llm: null,
+  });
+
+const MAX_MESSAGE_COMPACTION_STEPS = 1_000_000;
+const MAX_MESSAGE_COMPACTION_TRIGGER_CHARS = 16 * 1024 * 1024;
+const MAX_MESSAGE_COMPACTION_TRIGGER_TOKENS = 4 * 1024 * 1024;
+const MAX_MESSAGE_COMPACTION_CHARS_PER_TOKEN = 1_000;
+const MAX_MESSAGE_COMPACTION_KEEP_ITEMS = 100_000;
+const MAX_MESSAGE_COMPACTION_SUMMARY_CHARS = 1024 * 1024;
+
+const requireMessageCompactionInteger = (
+  name: string,
+  value: number,
+  minimum: number,
+  maximum: number
+) => {
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw new RangeError(
+      `${name} must be an integer between ${minimum} and ${maximum}`
+    );
+  }
+  return value;
+};
+
+const requireMessageCompactionNumber = (
+  name: string,
+  value: number,
+  minimum: number,
+  maximum: number
+) => {
+  if (!Number.isFinite(value) || value < minimum || value > maximum) {
+    throw new RangeError(
+      `${name} must be a finite number between ${minimum} and ${maximum}`
+    );
+  }
+  return value;
+};
+
+export const normalizeMessageCompactionSettings = (
+  settings: Partial<MessageCompactionSettings> | MessageCompactionSettings
+): MessageCompactionSettings => {
+  const merged: MessageCompactionSettings = {
+    ...defaultMessageCompactionSettings(),
+    ...settings,
+  };
+
+  if (merged.trigger_char_count != null && merged.trigger_token_count != null) {
+    throw new Error(
+      'Set trigger_char_count or trigger_token_count for message_compaction, not both.'
+    );
+  }
+
+  merged.compact_every_n_steps = requireMessageCompactionInteger(
+    'message_compaction.compact_every_n_steps',
+    merged.compact_every_n_steps,
+    1,
+    MAX_MESSAGE_COMPACTION_STEPS
+  );
+  merged.chars_per_token = requireMessageCompactionNumber(
+    'message_compaction.chars_per_token',
+    merged.chars_per_token,
+    Number.EPSILON,
+    MAX_MESSAGE_COMPACTION_CHARS_PER_TOKEN
+  );
+  merged.keep_last_items = requireMessageCompactionInteger(
+    'message_compaction.keep_last_items',
+    merged.keep_last_items,
+    0,
+    MAX_MESSAGE_COMPACTION_KEEP_ITEMS
+  );
+  merged.summary_max_chars = requireMessageCompactionInteger(
+    'message_compaction.summary_max_chars',
+    merged.summary_max_chars,
+    0,
+    MAX_MESSAGE_COMPACTION_SUMMARY_CHARS
+  );
+
+  if (merged.trigger_token_count != null) {
+    merged.trigger_token_count = requireMessageCompactionInteger(
+      'message_compaction.trigger_token_count',
+      merged.trigger_token_count,
+      1,
+      MAX_MESSAGE_COMPACTION_TRIGGER_TOKENS
+    );
+    merged.trigger_char_count = requireMessageCompactionInteger(
+      'message_compaction trigger threshold',
+      Math.floor(merged.trigger_token_count * merged.chars_per_token),
+      1,
+      MAX_MESSAGE_COMPACTION_TRIGGER_CHARS
+    );
+  } else if (merged.trigger_char_count == null) {
+    merged.trigger_char_count = 40000;
+  } else {
+    merged.trigger_char_count = requireMessageCompactionInteger(
+      'message_compaction.trigger_char_count',
+      merged.trigger_char_count,
+      1,
+      MAX_MESSAGE_COMPACTION_TRIGGER_CHARS
+    );
+  }
+
+  return merged;
+};
+
+export interface AgentSettings {
+  session_attachment_mode: 'copy' | 'strict' | 'shared';
+  use_vision: boolean | 'auto';
+  include_recent_events: boolean;
+  vision_detail_level: 'auto' | 'low' | 'high';
+  save_conversation_path: string | null;
+  save_conversation_path_encoding: string | null;
+  max_failures: number;
+  generate_gif: boolean | string;
+  override_system_message: string | null;
+  extend_system_message: string | null;
+  include_attributes: string[];
+  max_actions_per_step: number;
+  use_thinking: boolean;
+  flash_mode: boolean;
+  use_judge: boolean;
+  ground_truth: string | null;
+  max_history_items: number | null;
+  page_extraction_llm: unknown | null;
+  enable_planning: boolean;
+  planning_replan_on_stall: number;
+  planning_exploration_limit: number;
+  calculate_cost: boolean;
+  include_tool_call_examples: boolean;
+  llm_timeout: number;
+  step_timeout: number;
+  final_response_after_failure: boolean;
+  message_compaction: MessageCompactionSettings | null;
+  loop_detection_window: number;
+  loop_detection_enabled: boolean;
+}
+
+export const defaultAgentSettings = (): AgentSettings => ({
+  session_attachment_mode: 'copy',
+  use_vision: true,
+  include_recent_events: false,
+  vision_detail_level: 'auto',
+  save_conversation_path: null,
+  save_conversation_path_encoding: 'utf-8',
+  max_failures: 3,
+  generate_gif: false,
+  override_system_message: null,
+  extend_system_message: null,
+  include_attributes: [...DEFAULT_INCLUDE_ATTRIBUTES],
+  max_actions_per_step: 5,
+  use_thinking: true,
+  flash_mode: false,
+  use_judge: true,
+  ground_truth: null,
+  max_history_items: null,
+  page_extraction_llm: null,
+  enable_planning: true,
+  planning_replan_on_stall: 3,
+  planning_exploration_limit: 5,
+  calculate_cost: false,
+  include_tool_call_examples: false,
+  llm_timeout: 60,
+  step_timeout: 180,
+  final_response_after_failure: true,
+  message_compaction: null,
+  loop_detection_window: 20,
+  loop_detection_enabled: true,
+});
+
+export class AgentState {
+  agent_id: string;
+  n_steps: number;
+  consecutive_failures: number;
+  last_result: ActionResult[] | null;
+  last_plan: string | null;
+  plan: PlanItem[] | null;
+  current_plan_item_index: number;
+  plan_generation_step: number | null;
+  last_model_output: AgentOutput | null;
+  paused: boolean;
+  stopped: boolean;
+  session_initialized: boolean;
+  follow_up_task: boolean;
+  message_manager_state: MessageManagerState;
+  file_system_state: FileSystemState | null;
+  loop_detector: ActionLoopDetector;
+
+  constructor(init?: Partial<AgentState>) {
+    this.agent_id = init?.agent_id ?? '';
+    this.n_steps = init?.n_steps ?? 1;
+    this.consecutive_failures = init?.consecutive_failures ?? 0;
+    this.last_result = init?.last_result ?? null;
+    this.last_plan = init?.last_plan ?? null;
+    this.plan =
+      init?.plan?.map((item) =>
+        item instanceof PlanItem ? item : new PlanItem(item)
+      ) ?? null;
+    this.current_plan_item_index = init?.current_plan_item_index ?? 0;
+    this.plan_generation_step = init?.plan_generation_step ?? null;
+    this.last_model_output = init?.last_model_output ?? null;
+    this.paused = init?.paused ?? false;
+    this.stopped = init?.stopped ?? false;
+    this.session_initialized = init?.session_initialized ?? false;
+    this.follow_up_task = init?.follow_up_task ?? false;
+    if (init?.message_manager_state instanceof MessageManagerState) {
+      this.message_manager_state = init.message_manager_state;
+    } else if (init?.message_manager_state) {
+      this.message_manager_state = Object.assign(
+        new MessageManagerState(),
+        init.message_manager_state
+      );
+    } else {
+      this.message_manager_state = new MessageManagerState();
+    }
+    this.file_system_state = init?.file_system_state ?? null;
+    if (init?.loop_detector instanceof ActionLoopDetector) {
+      this.loop_detector = init.loop_detector;
+    } else if (init?.loop_detector) {
+      this.loop_detector = new ActionLoopDetector(init.loop_detector);
+    } else {
+      this.loop_detector = new ActionLoopDetector();
+    }
+  }
+
+  model_dump(): Record<string, unknown> {
+    return {
+      agent_id: this.agent_id,
+      n_steps: this.n_steps,
+      consecutive_failures: this.consecutive_failures,
+      last_result:
+        this.last_result?.map((result) => result.model_dump()) ?? null,
+      last_plan: this.last_plan,
+      plan: this.plan?.map((item) => item.model_dump()) ?? null,
+      current_plan_item_index: this.current_plan_item_index,
+      plan_generation_step: this.plan_generation_step,
+      last_model_output: this.last_model_output?.model_dump() ?? null,
+      paused: this.paused,
+      stopped: this.stopped,
+      session_initialized: this.session_initialized,
+      follow_up_task: this.follow_up_task,
+      message_manager_state: JSON.parse(
+        JSON.stringify(this.message_manager_state)
+      ),
+      file_system_state: this.file_system_state,
+      loop_detector: JSON.parse(JSON.stringify(this.loop_detector)),
+    };
+  }
+
+  toJSON() {
+    return this.model_dump();
+  }
+}
+
+export class AgentStepInfo {
+  constructor(
+    public step_number: number,
+    public max_steps: number
+  ) {}
+
+  is_last_step() {
+    return this.step_number >= this.max_steps - 1;
+  }
+}
+
+export class StepMetadata {
+  constructor(
+    public step_start_time: number,
+    public step_end_time: number,
+    public step_number: number,
+    public step_interval: number | null = null
+  ) {}
+
+  get duration_seconds() {
+    return this.step_end_time - this.step_start_time;
+  }
+}
+
+export type PlanItemStatus = 'pending' | 'current' | 'done' | 'skipped';
+
+export class PlanItem {
+  text: string;
+  status: PlanItemStatus;
+
+  constructor(init?: Partial<PlanItem>) {
+    this.text = init?.text ?? '';
+    this.status = init?.status ?? 'pending';
+  }
+
+  model_dump() {
+    return {
+      text: this.text,
+      status: this.status,
+    };
+  }
+}
+
+export interface AgentBrain {
+  thinking: string | null;
+  evaluation_previous_goal: string;
+  memory: string;
+  next_goal: string;
+}
+
+export class AgentOutput {
+  thinking: string | null;
+  evaluation_previous_goal: string | null;
+  memory: string | null;
+  next_goal: string | null;
+  current_plan_item: number | null;
+  plan_update: string[] | null;
+  action: ActionModel[];
+
+  constructor(init?: Partial<AgentOutput>) {
+    this.thinking = init?.thinking ?? null;
+    this.evaluation_previous_goal = init?.evaluation_previous_goal ?? null;
+    this.memory = init?.memory ?? null;
+    this.next_goal = init?.next_goal ?? null;
+    this.current_plan_item = init?.current_plan_item ?? null;
+    this.plan_update = init?.plan_update ?? null;
+    this.action = (init?.action ?? []).map((entry) =>
+      entry instanceof ActionModel ? entry : new ActionModel(entry)
+    );
+  }
+
+  get current_state(): AgentBrain {
+    return {
+      thinking: this.thinking,
+      evaluation_previous_goal: this.evaluation_previous_goal ?? '',
+      memory: this.memory ?? '',
+      next_goal: this.next_goal ?? '',
+    };
+  }
+
+  model_dump() {
+    return {
+      thinking: this.thinking,
+      evaluation_previous_goal: this.evaluation_previous_goal,
+      memory: this.memory,
+      next_goal: this.next_goal,
+      current_plan_item: this.current_plan_item,
+      plan_update: this.plan_update,
+      action: this.action.map((action) => action.model_dump?.() ?? action),
+    };
+  }
+
+  model_dump_json() {
+    return JSON.stringify(this.model_dump());
+  }
+
+  toJSON() {
+    return this.model_dump();
+  }
+
+  static fromJSON(data: any): AgentOutput {
+    if (!data) {
+      return new AgentOutput();
+    }
+    const actions = Array.isArray(data.action)
+      ? data.action.map((item: any) => new ActionModel(item))
+      : [];
+    return new AgentOutput({
+      thinking: data.thinking ?? null,
+      evaluation_previous_goal: data.evaluation_previous_goal ?? null,
+      memory: data.memory ?? null,
+      next_goal: data.next_goal ?? null,
+      current_plan_item:
+        typeof data.current_plan_item === 'number'
+          ? data.current_plan_item
+          : null,
+      plan_update: Array.isArray(data.plan_update)
+        ? data.plan_update.filter(
+            (item: unknown): item is string => typeof item === 'string'
+          )
+        : null,
+      action: actions,
+    });
+  }
+
+  static type_with_custom_actions<T extends ActionModel>(
+    custom_actions: new (initialData?: Record<string, any>) => T
+  ) {
+    const CustomActionModel = custom_actions;
+
+    return class AgentOutputWithCustomActions extends AgentOutput {
+      constructor(init?: Partial<AgentOutput>) {
+        super(init);
+        this.action = (init?.action ?? []).map((entry) =>
+          entry instanceof CustomActionModel
+            ? entry
+            : new CustomActionModel(
+                (entry as any)?.model_dump?.() ?? (entry as any)
+              )
+        );
+      }
+    };
+  }
+
+  static type_with_custom_actions_no_thinking<T extends ActionModel>(
+    custom_actions: new (initialData?: Record<string, any>) => T
+  ) {
+    const BaseModel = AgentOutput.type_with_custom_actions(custom_actions);
+
+    return class AgentOutputWithoutThinking extends BaseModel {
+      constructor(init?: Partial<AgentOutput>) {
+        super(init);
+        this.thinking = null;
+      }
+    };
+  }
+
+  static type_with_custom_actions_flash_mode<T extends ActionModel>(
+    custom_actions: new (initialData?: Record<string, any>) => T
+  ) {
+    const BaseModel = AgentOutput.type_with_custom_actions(custom_actions);
+
+    return class AgentOutputFlashMode extends BaseModel {
+      constructor(init?: Partial<AgentOutput>) {
+        super(init);
+        this.thinking = null;
+        this.evaluation_previous_goal = null;
+        this.next_goal = null;
+        this.current_plan_item = null;
+        this.plan_update = null;
+      }
+    };
+  }
+}
+
+export class AgentHistory {
+  constructor(
+    public model_output: AgentOutput | null,
+    public result: ActionResult[],
+    public state: BrowserStateHistory,
+    public metadata: StepMetadata | null = null,
+    public state_message: string | null = null
+  ) {}
+
+  static get_interacted_element(
+    model_output: AgentOutput,
+    selector_map: SelectorMap
+  ) {
+    const elements: Array<DOMHistoryElement | null> = [];
+    for (const action of model_output.action) {
+      const index =
+        typeof action.get_index === 'function' ? action.get_index() : null;
+      if (index != null && selector_map[index]) {
+        const node = selector_map[index] as DOMElementNode;
+        elements.push(
+          HistoryTreeProcessor.convert_dom_element_to_history_element(node)
+        );
+      } else {
+        elements.push(null);
+      }
+    }
+    return elements;
+  }
+
+  private static _filterSensitiveDataFromString(
+    value: string,
+    sensitive_data: SensitiveDataMap | null
+  ) {
+    return redactSensitiveDataFromString(
+      value,
+      sensitive_data,
+      MAX_AGENT_HISTORY_FILE_BYTES
+    );
+  }
+
+  private static _filterSensitiveData<T>(
+    data: T,
+    sensitive_data: SensitiveDataMap | null
+  ): T {
+    const activeObjects = new WeakSet<object>();
+    let remainingEntries = MAX_AGENT_HISTORY_VALUE_ENTRIES;
+
+    const visit = (value: unknown, depth: number): unknown => {
+      if (typeof value === 'string') {
+        return sensitive_data
+          ? this._filterSensitiveDataFromString(value, sensitive_data)
+          : value;
+      }
+      if (typeof value === 'bigint') return value.toString();
+      if (typeof value === 'symbol' || typeof value === 'function') {
+        return `[${typeof value}]`;
+      }
+      if (!value || typeof value !== 'object') return value;
+      if (value instanceof Date) return value;
+      if (depth >= MAX_AGENT_HISTORY_VALUE_DEPTH || remainingEntries <= 0) {
+        return '[Truncated]';
+      }
+      if (activeObjects.has(value)) return '[Circular]';
+
+      activeObjects.add(value);
+      try {
+        if (ArrayBuffer.isView(value)) {
+          return `[Binary ${(value as ArrayBufferView).byteLength} bytes]`;
+        }
+        if (value instanceof ArrayBuffer) {
+          return `[Binary ${value.byteLength} bytes]`;
+        }
+        if (Array.isArray(value)) {
+          const output: unknown[] = [];
+          let index = 0;
+          while (index < value.length && remainingEntries > 0) {
+            remainingEntries -= 1;
+            try {
+              output.push(visit(value[index], depth + 1));
+            } catch {
+              output.push('[Unreadable]');
+            }
+            index += 1;
+          }
+          if (index < value.length) output.push('[Truncated]');
+          return output;
+        }
+
+        const output = Object.create(null) as Record<string, unknown>;
+        let truncated = false;
+        try {
+          const record = value as Record<string, unknown>;
+          for (const rawKey in record) {
+            if (!Object.prototype.hasOwnProperty.call(record, rawKey)) {
+              continue;
+            }
+            if (remainingEntries <= 0) {
+              truncated = true;
+              break;
+            }
+            remainingEntries -= 1;
+            const key = sensitive_data
+              ? this._filterSensitiveDataFromString(rawKey, sensitive_data)
+              : rawKey;
+            if (!key) continue;
+            try {
+              output[key] = visit(record[rawKey], depth + 1);
+            } catch {
+              output[key] = '[Unreadable]';
+            }
+          }
+        } catch {
+          return '[Unreadable]';
+        }
+        if (truncated) output.__browser_use_truncated__ = true;
+        return output;
+      } finally {
+        activeObjects.delete(value);
+      }
+    };
+
+    return visit(data, 0) as T;
+  }
+
+  toJSON(
+    sensitive_data: Record<
+      string,
+      string | Record<string, string>
+    > | null = null
+  ) {
+    const payload = {
+      model_output: this.model_output?.toJSON() ?? null,
+      result: this.result.map((r) => r.toJSON()),
+      state: this.state.to_dict(),
+      metadata: this.metadata
+        ? {
+            step_start_time: this.metadata.step_start_time,
+            step_end_time: this.metadata.step_end_time,
+            step_number: this.metadata.step_number,
+            step_interval: this.metadata.step_interval,
+          }
+        : null,
+      state_message: this.state_message,
+    };
+    return AgentHistory._filterSensitiveData(payload, sensitive_data);
+  }
+}
+
+export class AgentHistoryList<TStructured = unknown> {
+  history: AgentHistory[];
+  usage: UsageSummary | null;
+  _output_model_schema: StructuredOutputParser<TStructured> | null = null;
+
+  constructor(history: AgentHistory[] = [], usage: UsageSummary | null = null) {
+    this.history = history;
+    this.usage = usage ?? null;
+  }
+
+  total_duration_seconds() {
+    return this.history.reduce(
+      (sum, item) => sum + (item.metadata?.duration_seconds ?? 0),
+      0
+    );
+  }
+
+  add_item(history_item: AgentHistory) {
+    this.history.push(history_item);
+  }
+
+  last_action() {
+    if (!this.history.length) {
+      return null;
+    }
+    const last = this.history[this.history.length - 1];
+    if (!last.model_output || !last.model_output.action.length) {
+      return null;
+    }
+    const action =
+      last.model_output.action[last.model_output.action.length - 1];
+    if (typeof (action as any)?.model_dump === 'function') {
+      return (action as any).model_dump();
+    }
+    return action;
+  }
+
+  errors() {
+    return this.history.map((historyItem) => {
+      const error = historyItem.result.find((result) => result.error);
+      return error?.error ?? null;
+    });
+  }
+
+  final_result(): string | null {
+    if (!this.history.length) {
+      return null;
+    }
+    const last = this.history[this.history.length - 1];
+    const result = last.result[last.result.length - 1];
+    return result?.extracted_content ?? null;
+  }
+
+  is_done() {
+    if (!this.history.length) {
+      return false;
+    }
+    const last = this.history[this.history.length - 1];
+    const result = last.result[last.result.length - 1];
+    return result?.is_done === true;
+  }
+
+  is_successful(): boolean | null {
+    if (!this.history.length) {
+      return null;
+    }
+    const last = this.history[this.history.length - 1];
+    const result = last.result[last.result.length - 1];
+    if (result?.is_done) {
+      return result.success ?? null;
+    }
+    return null;
+  }
+
+  judgement(): Record<string, unknown> | null {
+    if (!this.history.length) {
+      return null;
+    }
+    const last = this.history[this.history.length - 1];
+    const result = last.result[last.result.length - 1];
+    if (result?.judgement && typeof result.judgement === 'object') {
+      return result.judgement;
+    }
+    return null;
+  }
+
+  is_judged() {
+    return this.judgement() != null;
+  }
+
+  is_validated(): boolean | null {
+    const judgement = this.judgement();
+    if (!judgement) {
+      return null;
+    }
+    return judgement.verdict === true;
+  }
+
+  has_errors() {
+    return this.errors().some((error) => error != null);
+  }
+
+  urls() {
+    return this.history.map((item) => item.state.url ?? null);
+  }
+
+  screenshot_paths(
+    n_last: number | null = null,
+    return_none_if_not_screenshot = true
+  ) {
+    if (n_last === 0) {
+      return [];
+    }
+    const items = n_last == null ? this.history : this.history.slice(-n_last);
+    return items
+      .map((item) => item.state.screenshot_path ?? null)
+      .filter(
+        (pathValue) => return_none_if_not_screenshot || pathValue !== null
+      );
+  }
+
+  screenshots(
+    n_last: number | null = null,
+    return_none_if_not_screenshot = true
+  ) {
+    if (n_last === 0) {
+      return [];
+    }
+    const items = n_last == null ? this.history : this.history.slice(-n_last);
+    const firstReadableIndex = Math.max(
+      0,
+      items.length - MAX_HISTORY_SCREENSHOT_FILES
+    );
+    const screenshots: Array<string | null> = [];
+    let retainedBytes = 0;
+    for (let index = 0; index < items.length; index += 1) {
+      const item = items[index]!;
+      if (
+        index < firstReadableIndex ||
+        retainedBytes >= MAX_HISTORY_SCREENSHOT_TOTAL_BYTES
+      ) {
+        if (return_none_if_not_screenshot) screenshots.push(null);
+        continue;
+      }
+      const screenshot = item.state.get_screenshot();
+      if (screenshot) {
+        const screenshotBytes = Buffer.byteLength(screenshot, 'base64');
+        if (
+          retainedBytes + screenshotBytes <=
+          MAX_HISTORY_SCREENSHOT_TOTAL_BYTES
+        ) {
+          retainedBytes += screenshotBytes;
+          screenshots.push(screenshot);
+        } else {
+          retainedBytes = MAX_HISTORY_SCREENSHOT_TOTAL_BYTES;
+          if (return_none_if_not_screenshot) screenshots.push(null);
+        }
+      } else if (return_none_if_not_screenshot) {
+        screenshots.push(null);
+      }
+    }
+    return screenshots;
+  }
+
+  action_names() {
+    const names: string[] = [];
+    for (const action of this.model_actions()) {
+      const [name] = Object.keys(action);
+      if (name) {
+        names.push(name);
+      }
+    }
+    return names;
+  }
+
+  model_thoughts() {
+    return this.history
+      .filter((item) => item.model_output)
+      .map((item) => item.model_output!.current_state);
+  }
+
+  model_outputs() {
+    return (
+      this.history
+        .filter((item) => item.model_output)
+        .map((item) => item.model_output!) ?? []
+    );
+  }
+
+  model_actions() {
+    const outputs: Record<string, unknown>[] = [];
+    for (const item of this.history) {
+      if (!item.model_output) {
+        continue;
+      }
+      const interacted = item.state.interacted_element ?? [];
+      for (let index = 0; index < item.model_output.action.length; index += 1) {
+        const action = item.model_output.action[index];
+        const interactedElement = interacted[index] ?? null;
+        const payload =
+          typeof (action as any)?.model_dump === 'function'
+            ? (action as any).model_dump()
+            : action;
+        if (payload && typeof payload === 'object' && interactedElement) {
+          (payload as Record<string, unknown>).interacted_element =
+            interactedElement;
+        } else if (payload && typeof payload === 'object') {
+          (payload as Record<string, unknown>).interacted_element =
+            interactedElement;
+        }
+        outputs.push(payload);
+      }
+    }
+    return outputs;
+  }
+
+  action_history() {
+    const history: Array<Array<Record<string, unknown>>> = [];
+    for (const item of this.history) {
+      const stepActions: Array<Record<string, unknown>> = [];
+      if (item.model_output) {
+        const interacted = item.state.interacted_element ?? [];
+        for (
+          let index = 0;
+          index < item.model_output.action.length;
+          index += 1
+        ) {
+          const action = item.model_output.action[index];
+          const interactedElement = interacted[index] ?? null;
+          const result = item.result[index];
+          const payload =
+            typeof (action as any)?.model_dump === 'function'
+              ? (action as any).model_dump()
+              : action;
+          const enriched: Record<string, unknown> =
+            payload && typeof payload === 'object'
+              ? { ...payload }
+              : { action: payload };
+          enriched.interacted_element = interactedElement;
+          enriched.result = result?.long_term_memory ?? null;
+          stepActions.push(enriched);
+        }
+      }
+      history.push(stepActions);
+    }
+    return history;
+  }
+
+  action_results() {
+    return this.history.flatMap((item) => item.result);
+  }
+
+  extracted_content() {
+    return this.history.flatMap((item) =>
+      item.result.map((result) => result.extracted_content).filter(Boolean)
+    );
+  }
+
+  model_actions_filtered(include: string[] = []) {
+    if (!include.length) {
+      return this.model_actions();
+    }
+    return this.model_actions().filter((action) => {
+      const [name] = Object.keys(action);
+      return include.includes(name);
+    });
+  }
+
+  number_of_steps() {
+    return this.history.length;
+  }
+
+  agent_steps(max_chars: number | null = null) {
+    if (
+      max_chars !== null &&
+      (!Number.isSafeInteger(max_chars) || max_chars < 0)
+    ) {
+      throw new RangeError('max_chars must be a non-negative integer or null');
+    }
+    if (max_chars === 0) {
+      return [];
+    }
+
+    const steps: string[] = [];
+    let remainingChars = max_chars;
+    const append = (chunks: string[], value: string) => {
+      if (remainingChars === null) {
+        chunks.push(value);
+        return;
+      }
+      if (remainingChars <= 0) return;
+      const bounded = value.slice(0, remainingChars);
+      chunks.push(bounded);
+      remainingChars -= bounded.length;
+    };
+
+    for (
+      let stepIndex = 0;
+      stepIndex < this.history.length && remainingChars !== 0;
+      stepIndex += 1
+    ) {
+      const historyItem = this.history[stepIndex];
+      const stepChunks: string[] = [];
+      append(stepChunks, `Step ${stepIndex + 1}:\n`);
+
+      if (remainingChars !== 0 && historyItem.model_output?.action?.length) {
+        const actionsText =
+          remainingChars === null
+            ? JSON.stringify(
+                historyItem.model_output.action.map((action) =>
+                  typeof (action as any)?.model_dump === 'function'
+                    ? (action as any).model_dump()
+                    : action
+                ),
+                null,
+                1
+              )
+            : stableSerialize(
+                historyItem.model_output.action,
+                remainingChars as number
+              );
+        append(stepChunks, 'Actions: ');
+        append(stepChunks, actionsText);
+        append(stepChunks, '\n');
+      }
+
+      if (remainingChars !== 0 && historyItem.result?.length) {
+        for (
+          let resultIndex = 0;
+          resultIndex < historyItem.result.length && remainingChars !== 0;
+          resultIndex += 1
+        ) {
+          const result = historyItem.result[resultIndex];
+          if (result?.extracted_content) {
+            append(stepChunks, `Result ${resultIndex + 1}: `);
+            append(stepChunks, String(result.extracted_content));
+            append(stepChunks, '\n');
+          }
+          if (remainingChars !== 0 && result?.error) {
+            append(stepChunks, `Error ${resultIndex + 1}: `);
+            append(stepChunks, String(result.error));
+            append(stepChunks, '\n');
+          }
+        }
+      }
+
+      steps.push(stepChunks.join(''));
+    }
+    return steps;
+  }
+
+  get structured_output(): TStructured | null {
+    const final_result = this.final_result();
+    if (!final_result || !this._output_model_schema) {
+      return null;
+    }
+    return parseStructuredOutput(this._output_model_schema, final_result);
+  }
+
+  get_structured_output(
+    outputModel: StructuredOutputParser<TStructured>
+  ): TStructured | null {
+    const finalResult = this.final_result();
+    if (!finalResult) {
+      return null;
+    }
+    return parseStructuredOutput(outputModel, finalResult);
+  }
+
+  save_to_file(
+    filepath: string,
+    sensitive_data: Record<
+      string,
+      string | Record<string, string>
+    > | null = null
+  ) {
+    const dir = path.dirname(filepath);
+    ensurePrivateDirectoryIfCreated(dir);
+    const serialized = JSON.stringify(this.toJSON(sensitive_data), null, 2);
+    if (Buffer.byteLength(serialized, 'utf8') > MAX_AGENT_HISTORY_FILE_BYTES) {
+      throw new Error(
+        `Agent history exceeds ${MAX_AGENT_HISTORY_FILE_BYTES} bytes`
+      );
+    }
+    writePrivateFileAtomic(filepath, serialized);
+  }
+
+  static load_from_file(
+    filepath: string,
+    outputModel: typeof AgentOutput
+  ): AgentHistoryList {
+    const content = readBoundedPrivateFile(
+      filepath,
+      MAX_AGENT_HISTORY_FILE_BYTES
+    );
+    const payload = JSON.parse(content) as Record<string, unknown>;
+    return AgentHistoryList.load_from_dict(payload, outputModel);
+  }
+
+  static load_from_dict(
+    payload: Record<string, unknown>,
+    outputModel: typeof AgentOutput
+  ): AgentHistoryList {
+    const root = requireHistoryRecord(payload, 'Agent history payload');
+    const rawHistory = root.history ?? [];
+    const historyEntries = requireHistoryArray(
+      rawHistory,
+      'Agent history payload.history',
+      MAX_LOADED_AGENT_HISTORY_ITEMS
+    );
+    const historyItems = historyEntries.map((rawEntry, index) => {
+      const entry = requireHistoryRecord(
+        rawEntry,
+        `Agent history entry ${index}`
+      );
+      let modelOutput: AgentOutput | null = null;
+      if (entry.model_output != null) {
+        const rawModelOutput = requireHistoryRecord(
+          entry.model_output,
+          `Agent history entry ${index}.model_output`
+        );
+        for (const field of [
+          'thinking',
+          'evaluation_previous_goal',
+          'memory',
+          'next_goal',
+        ] as const) {
+          requireNullableHistoryString(
+            rawModelOutput[field],
+            `Agent history entry ${index}.model_output.${field}`
+          );
+        }
+        if (rawModelOutput.current_plan_item != null) {
+          const currentPlanItem = requireFiniteHistoryNumber(
+            rawModelOutput.current_plan_item,
+            `Agent history entry ${index}.model_output.current_plan_item`
+          );
+          if (!Number.isSafeInteger(currentPlanItem)) {
+            throw new TypeError(
+              `Agent history entry ${index}.model_output.current_plan_item must be an integer`
+            );
+          }
+        }
+        if (rawModelOutput.plan_update != null) {
+          const planUpdate = requireHistoryArray(
+            rawModelOutput.plan_update,
+            `Agent history entry ${index}.model_output.plan_update`,
+            MAX_LOADED_STATE_COLLECTION_ITEMS
+          );
+          validateHistoryStringItems(
+            planUpdate,
+            `Agent history entry ${index}.model_output.plan_update`
+          );
+        }
+        if (rawModelOutput.action != null) {
+          const actions = requireHistoryArray(
+            rawModelOutput.action,
+            `Agent history entry ${index}.model_output.action`,
+            MAX_LOADED_ACTIONS_PER_HISTORY_ITEM
+          );
+          validateHistoryRecordItems(
+            actions,
+            `Agent history entry ${index}.model_output.action`
+          );
+        }
+        modelOutput = outputModel.fromJSON(rawModelOutput);
+      }
+
+      const rawResults = requireHistoryArray(
+        entry.result ?? [],
+        `Agent history entry ${index}.result`,
+        MAX_LOADED_RESULTS_PER_HISTORY_ITEM
+      );
+      const result = rawResults.map((item, resultIndex) => {
+        const rawResult = requireHistoryRecord(
+          item,
+          `Agent history entry ${index}.result[${resultIndex}]`
+        );
+        const resultLabel = `Agent history entry ${index}.result[${resultIndex}]`;
+        for (const field of ['is_done', 'success'] as const) {
+          requireNullableHistoryBoolean(
+            rawResult[field],
+            `${resultLabel}.${field}`
+          );
+        }
+        for (const field of [
+          'include_extracted_content_only_once',
+          'include_in_memory',
+        ] as const) {
+          if (
+            rawResult[field] != null &&
+            typeof rawResult[field] !== 'boolean'
+          ) {
+            throw new TypeError(`${resultLabel}.${field} must be a boolean`);
+          }
+        }
+        for (const field of [
+          'error',
+          'long_term_memory',
+          'extracted_content',
+        ] as const) {
+          requireNullableHistoryString(
+            rawResult[field],
+            `${resultLabel}.${field}`
+          );
+        }
+        for (const field of ['judgement', 'metadata'] as const) {
+          if (rawResult[field] != null) {
+            requireHistoryRecord(rawResult[field], `${resultLabel}.${field}`);
+          }
+        }
+        if (rawResult.attachments != null) {
+          const attachments = requireHistoryArray(
+            rawResult.attachments,
+            `${resultLabel}.attachments`,
+            MAX_LOADED_STATE_COLLECTION_ITEMS
+          );
+          validateHistoryStringItems(attachments, `${resultLabel}.attachments`);
+        }
+        if (rawResult.images != null) {
+          const images = requireHistoryArray(
+            rawResult.images,
+            `${resultLabel}.images`,
+            MAX_LOADED_STATE_COLLECTION_ITEMS
+          );
+          validateHistoryRecordItems(images, `${resultLabel}.images`);
+        }
+        return new ActionResult(rawResult as ActionResultInit);
+      });
+
+      const rawState = requireHistoryRecord(
+        entry.state ?? {},
+        `Agent history entry ${index}.state`
+      );
+      const tabs = requireHistoryArray(
+        rawState.tabs ?? [],
+        `Agent history entry ${index}.state.tabs`,
+        MAX_LOADED_STATE_COLLECTION_ITEMS
+      );
+      const interactedElements = requireHistoryArray(
+        rawState.interacted_element ?? [],
+        `Agent history entry ${index}.state.interacted_element`,
+        MAX_LOADED_STATE_COLLECTION_ITEMS
+      );
+      validateHistoryRecordItems(
+        tabs,
+        `Agent history entry ${index}.state.tabs`
+      );
+      interactedElements.forEach((item, elementIndex) => {
+        if (item != null) {
+          requireHistoryRecord(
+            item,
+            `Agent history entry ${index}.state.interacted_element[${elementIndex}]`
+          );
+        }
+      });
+      const url =
+        requireNullableHistoryString(
+          rawState.url,
+          `Agent history entry ${index}.state.url`
+        ) ?? '';
+      const title =
+        requireNullableHistoryString(
+          rawState.title,
+          `Agent history entry ${index}.state.title`
+        ) ?? '';
+      const screenshotPath = requireNullableHistoryString(
+        rawState.screenshot_path,
+        `Agent history entry ${index}.state.screenshot_path`
+      );
+      const state = new (BrowserStateHistory as any)(
+        url,
+        title,
+        tabs,
+        interactedElements,
+        screenshotPath
+      ) as BrowserStateHistory;
+
+      const rawMetadata =
+        entry.metadata == null
+          ? null
+          : requireHistoryRecord(
+              entry.metadata,
+              `Agent history entry ${index}.metadata`
+            );
+      let metadata: StepMetadata | null = null;
+      if (rawMetadata) {
+        const stepNumber = requireFiniteHistoryNumber(
+          rawMetadata.step_number,
+          `Agent history entry ${index}.metadata.step_number`
+        );
+        if (!Number.isSafeInteger(stepNumber)) {
+          throw new TypeError(
+            `Agent history entry ${index}.metadata.step_number must be an integer`
+          );
+        }
+        const stepInterval =
+          rawMetadata.step_interval == null
+            ? null
+            : requireFiniteHistoryNumber(
+                rawMetadata.step_interval,
+                `Agent history entry ${index}.metadata.step_interval`
+              );
+        metadata = new StepMetadata(
+          requireFiniteHistoryNumber(
+            rawMetadata.step_start_time,
+            `Agent history entry ${index}.metadata.step_start_time`
+          ),
+          requireFiniteHistoryNumber(
+            rawMetadata.step_end_time,
+            `Agent history entry ${index}.metadata.step_end_time`
+          ),
+          stepNumber,
+          stepInterval
+        );
+      }
+      const stateMessage = requireNullableHistoryString(
+        entry.state_message,
+        `Agent history entry ${index}.state_message`
+      );
+      return new AgentHistory(
+        modelOutput,
+        result,
+        state,
+        metadata,
+        stateMessage
+      );
+    });
+    return new AgentHistoryList(historyItems);
+  }
+
+  toJSON(
+    sensitive_data: Record<
+      string,
+      string | Record<string, string>
+    > | null = null
+  ) {
+    return {
+      history: this.history.map((item) => item.toJSON(sensitive_data)),
+    };
+  }
+
+  model_dump(
+    sensitive_data: Record<
+      string,
+      string | Record<string, string>
+    > | null = null
+  ) {
+    return this.toJSON(sensitive_data);
+  }
+}
+
+export class DetectedVariable {
+  constructor(
+    public name: string,
+    public original_value: string,
+    public type = 'string',
+    public format: string | null = null
+  ) {}
+
+  model_dump() {
+    return {
+      name: this.name,
+      original_value: this.original_value,
+      type: this.type,
+      format: this.format,
+    };
+  }
+}
+
+export class VariableMetadata {
+  constructor(
+    public detected_variables: Record<string, DetectedVariable> = {}
+  ) {}
+}
+
+export class AgentError extends Error {
+  static VALIDATION_ERROR =
+    'Invalid model output format. Please follow the correct schema.';
+  static RATE_LIMIT_ERROR = 'Rate limit reached. Waiting before retry.';
+  static NO_VALID_ACTION = 'No valid action found';
+
+  static format_error(error: Error, include_trace = false) {
+    if ((error as any)?.name === 'ValidationError') {
+      return `${AgentError.VALIDATION_ERROR}\nDetails: ${error.message}`;
+    }
+    if (error.name === 'RateLimitError') {
+      return AgentError.RATE_LIMIT_ERROR;
+    }
+    const errorStr = error.message ?? String(error);
+    if (
+      errorStr.includes('LLM response missing required fields') ||
+      errorStr.includes('Expected format: AgentOutput')
+    ) {
+      const [mainError] = errorStr.split('\n');
+      let helpfulMessage =
+        `${mainError}\n\n` +
+        'The previous response had an invalid output structure. ' +
+        'Please stick to the required output format. \n\n';
+      if (include_trace && (error as any)?.stack) {
+        helpfulMessage += `\n\nFull stacktrace:\n${(error as any).stack}`;
+      }
+      return helpfulMessage;
+    }
+    if (include_trace && (error as any)?.stack) {
+      return `${error.message}\nStacktrace:\n${(error as any).stack}`;
+    }
+    return error.message;
+  }
+}

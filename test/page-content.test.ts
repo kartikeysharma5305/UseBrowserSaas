@@ -1,0 +1,152 @@
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { chromium, type Browser, type Page } from 'playwright';
+import {
+  extractBoundedPageHtml,
+  MAX_MAIN_PAGE_HTML_CHARS,
+  MAX_PAGE_HTML_SELECTOR_CHARS,
+} from '../src/browser/page-content.js';
+
+describe('bounded page HTML extraction', () => {
+  let browser: Browser;
+  let page: Page;
+
+  beforeAll(async () => {
+    browser = await chromium.launch({ headless: true });
+    page = await browser.newPage();
+  });
+
+  afterAll(async () => {
+    await browser.close();
+  });
+
+  it('uses the bounded page-context serializer instead of content()', async () => {
+    const content = vi.fn(async () => 'secret'.repeat(1_000_000));
+    const evaluate = vi.fn(async (_fn: unknown, limits: any) => ({
+      html: 'x'.repeat(limits.maxOutputChars + 1_000),
+      truncated: false,
+      visitedNodes: 12,
+      sourceUrl: 'https://example.com/page',
+      rootFound: true,
+    }));
+
+    const result = await extractBoundedPageHtml(
+      { evaluate, content },
+      MAX_MAIN_PAGE_HTML_CHARS
+    );
+
+    expect(result.html).toHaveLength(MAX_MAIN_PAGE_HTML_CHARS);
+    expect(result.truncated).toBe(true);
+    expect(result.visitedNodes).toBe(12);
+    expect(result.sourceUrl).toBe('https://example.com/page');
+    expect(result.rootFound).toBe(true);
+    expect(evaluate).toHaveBeenCalledWith(
+      expect.any(Function),
+      expect.objectContaining({
+        maxOutputChars: MAX_MAIN_PAGE_HTML_CHARS,
+      })
+    );
+    expect(content).not.toHaveBeenCalled();
+  });
+
+  it('defensively bounds content-only compatibility adapters', async () => {
+    const result = await extractBoundedPageHtml(
+      { content: vi.fn(async () => 'x'.repeat(10_000)) },
+      1_000
+    );
+
+    expect(result.html).toHaveLength(1_000);
+    expect(result.truncated).toBe(true);
+  });
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY])(
+    'uses the safe default for invalid character limit %s',
+    async (invalidLimit) => {
+      const evaluate = vi.fn(async (_fn: unknown, limits: any) => ({
+        html: 'safe',
+        truncated: false,
+        visitedNodes: 1,
+        sourceUrl: '',
+        rootFound: true,
+        maxOutputChars: limits.maxOutputChars,
+      }));
+
+      await extractBoundedPageHtml({ evaluate }, invalidLimit);
+
+      expect(evaluate).toHaveBeenCalledWith(
+        expect.any(Function),
+        expect.objectContaining({
+          maxOutputChars: MAX_MAIN_PAGE_HTML_CHARS,
+        })
+      );
+    }
+  );
+
+  it.each([MAX_MAIN_PAGE_HTML_CHARS + 1, Number.MAX_SAFE_INTEGER])(
+    'enforces the hard character limit for oversized budget %s',
+    async (limit) => {
+      const evaluate = vi.fn(async (_fn: unknown, limits: any) => ({
+        html: 'safe',
+        truncated: false,
+        visitedNodes: 1,
+        sourceUrl: '',
+        rootFound: true,
+        maxOutputChars: limits.maxOutputChars,
+      }));
+
+      await extractBoundedPageHtml({ evaluate }, limit);
+
+      expect(evaluate).toHaveBeenCalledWith(
+        expect.any(Function),
+        expect.objectContaining({
+          maxOutputChars: MAX_MAIN_PAGE_HTML_CHARS,
+        })
+      );
+    }
+  );
+
+  it('passes a bounded selector to the page serializer', async () => {
+    const evaluate = vi.fn(async (_fn: unknown, limits: any) => ({
+      html: '<main>content</main>',
+      truncated: false,
+      visitedNodes: 2,
+      sourceUrl: 'https://example.com/page',
+      rootFound: true,
+      selector: limits.rootSelector,
+    }));
+
+    const result = await extractBoundedPageHtml(
+      { evaluate },
+      MAX_MAIN_PAGE_HTML_CHARS,
+      { selector: `main${'x'.repeat(3_000)}` }
+    );
+
+    expect(result.rootFound).toBe(true);
+    expect(evaluate).toHaveBeenCalledWith(
+      expect.any(Function),
+      expect.objectContaining({
+        rootSelector: expect.stringMatching(/^mainx+$/),
+      })
+    );
+    expect((evaluate.mock.calls[0]?.[1] as any).rootSelector).toHaveLength(
+      MAX_PAGE_HTML_SELECTOR_CHARS
+    );
+  });
+
+  it('does not depend on or mutate a page-owned __name global', async () => {
+    await page.setContent('<main>Browser Use documentation</main>');
+    await page.evaluate(() => {
+      Object.defineProperty(globalThis, '__name', {
+        value: 42,
+        writable: false,
+        configurable: false,
+      });
+    });
+
+    const result = await extractBoundedPageHtml(page, 10_000);
+
+    expect(result.html).toContain('Browser Use documentation');
+    await expect(page.evaluate(() => (globalThis as any).__name)).resolves.toBe(
+      42
+    );
+  });
+});

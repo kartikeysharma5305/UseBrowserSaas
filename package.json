@@ -1,0 +1,425 @@
+{
+  "name": "browser-use",
+  "version": "0.8.0",
+  "description": "A TypeScript-first library for programmatic browser control, designed for building AI-powered web agents.",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./agent": {
+      "types": "./dist/agent/index.d.ts",
+      "import": "./dist/agent/index.js",
+      "default": "./dist/agent/index.js"
+    },
+    "./actor": {
+      "types": "./dist/actor/index.d.ts",
+      "import": "./dist/actor/index.js",
+      "default": "./dist/actor/index.js"
+    },
+    "./browser": {
+      "types": "./dist/browser/index.d.ts",
+      "import": "./dist/browser/index.js",
+      "default": "./dist/browser/index.js"
+    },
+    "./browser/cloud": {
+      "types": "./dist/browser/cloud/index.d.ts",
+      "import": "./dist/browser/cloud/index.js",
+      "default": "./dist/browser/cloud/index.js"
+    },
+    "./controller": {
+      "types": "./dist/controller/index.d.ts",
+      "import": "./dist/controller/index.js",
+      "default": "./dist/controller/index.js"
+    },
+    "./code-use": {
+      "types": "./dist/code-use/index.d.ts",
+      "import": "./dist/code-use/index.js",
+      "default": "./dist/code-use/index.js"
+    },
+    "./tools": {
+      "types": "./dist/tools/index.d.ts",
+      "import": "./dist/tools/index.js",
+      "default": "./dist/tools/index.js"
+    },
+    "./filesystem": {
+      "types": "./dist/filesystem/index.d.ts",
+      "import": "./dist/filesystem/index.js",
+      "default": "./dist/filesystem/index.js"
+    },
+    "./integrations/gmail": {
+      "types": "./dist/integrations/gmail/index.d.ts",
+      "import": "./dist/integrations/gmail/index.js",
+      "default": "./dist/integrations/gmail/index.js"
+    },
+    "./llm/anthropic": {
+      "types": "./dist/llm/anthropic/index.d.ts",
+      "import": "./dist/llm/anthropic/index.js",
+      "default": "./dist/llm/anthropic/index.js"
+    },
+    "./llm/aws": {
+      "types": "./dist/llm/aws/index.d.ts",
+      "import": "./dist/llm/aws/index.js",
+      "default": "./dist/llm/aws/index.js"
+    },
+    "./llm/azure": {
+      "types": "./dist/llm/azure/index.d.ts",
+      "import": "./dist/llm/azure/index.js",
+      "default": "./dist/llm/azure/index.js"
+    },
+    "./llm/cerebras": {
+      "types": "./dist/llm/cerebras/index.d.ts",
+      "import": "./dist/llm/cerebras/index.js",
+      "default": "./dist/llm/cerebras/index.js"
+    },
+    "./llm/browser-use": {
+      "types": "./dist/llm/browser-use/index.d.ts",
+      "import": "./dist/llm/browser-use/index.js",
+      "default": "./dist/llm/browser-use/index.js"
+    },
+    "./llm/codex": {
+      "types": "./dist/llm/codex/index.d.ts",
+      "import": "./dist/llm/codex/index.js",
+      "default": "./dist/llm/codex/index.js"
+    },
+    "./llm/base": {
+      "types": "./dist/llm/base.d.ts",
+      "import": "./dist/llm/base.js",
+      "default": "./dist/llm/base.js"
+    },
+    "./llm/deepseek": {
+      "types": "./dist/llm/deepseek/index.d.ts",
+      "import": "./dist/llm/deepseek/index.js",
+      "default": "./dist/llm/deepseek/index.js"
+    },
+    "./llm/exceptions": {
+      "types": "./dist/llm/exceptions.d.ts",
+      "import": "./dist/llm/exceptions.js",
+      "default": "./dist/llm/exceptions.js"
+    },
+    "./llm/google": {
+      "types": "./dist/llm/google/index.d.ts",
+      "import": "./dist/llm/google/index.js",
+      "default": "./dist/llm/google/index.js"
+    },
+    "./llm/litellm": {
+      "types": "./dist/llm/litellm/index.d.ts",
+      "import": "./dist/llm/litellm/index.js",
+      "default": "./dist/llm/litellm/index.js"
+    },
+    "./llm/oci-raw": {
+      "types": "./dist/llm/oci-raw/index.d.ts",
+      "import": "./dist/llm/oci-raw/index.js",
+      "default": "./dist/llm/oci-raw/index.js"
+    },
+    "./llm/groq": {
+      "types": "./dist/llm/groq/index.d.ts",
+      "import": "./dist/llm/groq/index.js",
+      "default": "./dist/llm/groq/index.js"
+    },
+    "./llm/messages": {
+      "types": "./dist/llm/messages.d.ts",
+      "import": "./dist/llm/messages.js",
+      "default": "./dist/llm/messages.js"
+    },
+    "./llm/mistral": {
+      "types": "./dist/llm/mistral/index.d.ts",
+      "import": "./dist/llm/mistral/index.js",
+      "default": "./dist/llm/mistral/index.js"
+    },
+    "./llm/models": {
+      "types": "./dist/llm/models.d.ts",
+      "import": "./dist/llm/models.js",
+      "default": "./dist/llm/models.js"
+    },
+    "./llm/ollama": {
+      "types": "./dist/llm/ollama/index.d.ts",
+      "import": "./dist/llm/ollama/index.js",
+      "default": "./dist/llm/ollama/index.js"
+    },
+    "./llm/openai": {
+      "types": "./dist/llm/openai/index.d.ts",
+      "import": "./dist/llm/openai/index.js",
+      "default": "./dist/llm/openai/index.js"
+    },
+    "./llm/openrouter": {
+      "types": "./dist/llm/openrouter/index.d.ts",
+      "import": "./dist/llm/openrouter/index.js",
+      "default": "./dist/llm/openrouter/index.js"
+    },
+    "./llm/vercel": {
+      "types": "./dist/llm/vercel/index.d.ts",
+      "import": "./dist/llm/vercel/index.js",
+      "default": "./dist/llm/vercel/index.js"
+    },
+    "./llm/schema": {
+      "types": "./dist/llm/schema.d.ts",
+      "import": "./dist/llm/schema.js",
+      "default": "./dist/llm/schema.js"
+    },
+    "./llm/views": {
+      "types": "./dist/llm/views.d.ts",
+      "import": "./dist/llm/views.js",
+      "default": "./dist/llm/views.js"
+    },
+    "./mcp": {
+      "types": "./dist/mcp/index.d.ts",
+      "import": "./dist/mcp/index.js",
+      "default": "./dist/mcp/index.js"
+    },
+    "./screenshots": {
+      "types": "./dist/screenshots/index.d.ts",
+      "import": "./dist/screenshots/index.js",
+      "default": "./dist/screenshots/index.js"
+    },
+    "./sync": {
+      "types": "./dist/sync/index.d.ts",
+      "import": "./dist/sync/index.js",
+      "default": "./dist/sync/index.js"
+    },
+    "./skill-cli": {
+      "types": "./dist/skill-cli/index.d.ts",
+      "import": "./dist/skill-cli/index.js",
+      "default": "./dist/skill-cli/index.js"
+    },
+    "./skill-cli/direct": {
+      "types": "./dist/skill-cli/direct.d.ts",
+      "import": "./dist/skill-cli/direct.js",
+      "default": "./dist/skill-cli/direct.js"
+    },
+    "./skills": {
+      "types": "./dist/skills/index.d.ts",
+      "import": "./dist/skills/index.js",
+      "default": "./dist/skills/index.js"
+    },
+    "./sandbox": {
+      "types": "./dist/sandbox/index.d.ts",
+      "import": "./dist/sandbox/index.js",
+      "default": "./dist/sandbox/index.js"
+    },
+    "./telemetry": {
+      "types": "./dist/telemetry/index.d.ts",
+      "import": "./dist/telemetry/index.js",
+      "default": "./dist/telemetry/index.js"
+    },
+    "./tokens": {
+      "types": "./dist/tokens/index.d.ts",
+      "import": "./dist/tokens/index.js",
+      "default": "./dist/tokens/index.js"
+    },
+    "./cli": {
+      "types": "./dist/cli.d.ts",
+      "import": "./dist/cli.js",
+      "default": "./dist/cli.js"
+    },
+    "./config": {
+      "types": "./dist/config.d.ts",
+      "import": "./dist/config.js",
+      "default": "./dist/config.js"
+    },
+    "./event-bus": {
+      "types": "./dist/event-bus.d.ts",
+      "import": "./dist/event-bus.js",
+      "default": "./dist/event-bus.js"
+    },
+    "./exceptions": {
+      "types": "./dist/exceptions.d.ts",
+      "import": "./dist/exceptions.js",
+      "default": "./dist/exceptions.js"
+    },
+    "./logging-config": {
+      "types": "./dist/logging-config.d.ts",
+      "import": "./dist/logging-config.js",
+      "default": "./dist/logging-config.js"
+    },
+    "./observability": {
+      "types": "./dist/observability.d.ts",
+      "import": "./dist/observability.js",
+      "default": "./dist/observability.js"
+    },
+    "./observability-decorators": {
+      "types": "./dist/observability-decorators.d.ts",
+      "import": "./dist/observability-decorators.js",
+      "default": "./dist/observability-decorators.js"
+    },
+    "./utils": {
+      "types": "./dist/utils.d.ts",
+      "import": "./dist/utils.js",
+      "default": "./dist/utils.js"
+    },
+    "./package.json": "./package.json",
+    "./dist/*": "./dist/*"
+  },
+  "bin": {
+    "browser-use": "./dist/cli-entry.js",
+    "browser-use-direct": "./dist/skill-cli/direct.js"
+  },
+  "type": "module",
+  "files": [
+    "dist",
+    "skills"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "packageManager": "pnpm@10.28.1",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "build": "node scripts/clean-dist.mjs && tsc && node scripts/copy-dom-tree.mjs",
+    "build:watch": "tsc --watch --preserveWatchOutput",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "lint": "eslint \"src/**/*.ts\" \"test/**/*.ts\"",
+    "lint:fix": "eslint \"src/**/*.ts\" \"test/**/*.ts\" --fix",
+    "test": "vitest run",
+    "test:unit": "vitest run test --exclude test/integration*.test.ts --exclude test/cli-interactive.e2e.test.ts --exclude test/codex-oauth-smoke.e2e.test.ts",
+    "test:integration": "vitest run test/integration.test.ts test/integration-advanced.test.ts",
+    "test:e2e": "vitest run test/cli-interactive.e2e.test.ts",
+    "test:e2e:codex": "BROWSER_USE_CODEX_E2E=1 vitest run test/codex-oauth-smoke.e2e.test.ts",
+    "test:e2e:codex:agent": "BROWSER_USE_CODEX_E2E=1 BROWSER_USE_CODEX_E2E_AGENT=1 vitest run test/codex-oauth-smoke.e2e.test.ts",
+    "test:coverage": "vitest run --coverage",
+    "test:watch": "vitest --watch",
+    "test:pack": "node scripts/smoke-pack.mjs",
+    "test:startup": "pnpm build && node scripts/check-cli-startup.mjs",
+    "skill:commands:sync": "tsx scripts/sync-direct-skill-commands.ts",
+    "skill:commands:check": "tsx scripts/sync-direct-skill-commands.ts --check",
+    "version:check": "node scripts/update-version.mjs --check",
+    "version:sync": "node scripts/update-version.mjs sync",
+    "version:bump": "node scripts/update-version.mjs",
+    "version:patch": "node scripts/update-version.mjs patch",
+    "version:minor": "node scripts/update-version.mjs minor",
+    "version:major": "node scripts/update-version.mjs major",
+    "check": "pnpm lint && pnpm skill:commands:check && pnpm typecheck && pnpm typecheck:test && pnpm test:startup && pnpm test:unit && pnpm test:integration && pnpm test:e2e && pnpm test:pack",
+    "commit": "cz",
+    "typecheck": "tsc --noEmit",
+    "typecheck:test": "tsc -p tsconfig.test.json --noEmit",
+    "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"test/**/*.ts\"",
+    "prettier": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
+    "prepack": "pnpm skill:commands:check && pnpm build",
+    "postinstall": "playwright install chromium",
+    "postinstall:ci": "playwright install --with-deps chromium",
+    "dashboard:dev": "pnpm --dir dashboard dev",
+    "dashboard:build": "pnpm --dir dashboard build",
+    "dashboard:start": "pnpm --dir dashboard start",
+    "dashboard:lint": "pnpm --dir dashboard lint",
+    "dashboard:typecheck": "pnpm --dir dashboard typecheck",
+    "dashboard:prisma:generate": "pnpm --dir dashboard prisma generate",
+    "dashboard:prisma:migrate": "pnpm --dir dashboard prisma migrate dev"
+  },
+  "config": {
+    "commitizen": {
+      "path": "cz-conventional-changelog"
+    }
+  },
+  "keywords": [
+    "browser",
+    "use",
+    "ai",
+    "agent",
+    "web",
+    "automation"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/webllm/browser-use.git"
+  },
+  "author": "unadlib",
+  "license": "MIT",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.74.0",
+    "@aws-sdk/client-bedrock-runtime": "^3.1012.0",
+    "@cfworker/json-schema": "^4.1.1",
+    "@google/genai": "^1.40.0",
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "adm-zip": "^0.5.16",
+    "axios": "^1.16.0",
+    "canvas": "^3.2.1",
+    "dotenv": "^17.2.4",
+    "eventemitter3": "^5.0.4",
+    "extract-zip": "^2.0.1",
+    "gif-encoder-2": "^1.0.5",
+    "googleapis": "^171.4.0",
+    "gpt-tokenizer": "^3.4.0",
+    "groq-sdk": "^0.37.0",
+    "minimatch": "^10.2.3",
+    "oci-common": "^2.132.0",
+    "oci-generativeaiinference": "^2.132.0",
+    "ollama": "^0.6.3",
+    "openai": "^6.18.0",
+    "pdf-parse": "^2.4.5",
+    "pdfkit": "^0.17.2",
+    "playwright": "^1.58.2",
+    "posthog-node": "^5.24.11",
+    "semver": "^7.8.1",
+    "turndown": "^7.2.2",
+    "zod": "^4.3.6",
+    "zod-to-json-schema": "^3.25.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.2",
+    "@types/adm-zip": "^0.5.7",
+    "@types/node": "^25.2.2",
+    "@types/pdf-parse": "^1.1.5",
+    "@types/pdfkit": "^0.17.4",
+    "@types/semver": "^7.7.1",
+    "@types/turndown": "^5.0.6",
+    "@typescript-eslint/eslint-plugin": "^8.54.0",
+    "@typescript-eslint/parser": "^8.54.0",
+    "@vitest/coverage-v8": "^4.1.8",
+    "commitizen": "^4.3.1",
+    "cz-conventional-changelog": "^3.3.0",
+    "eslint": "^9.39.2",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-import": "^2.32.0",
+    "eslint-plugin-jsx-a11y": "^6.10.2",
+    "eslint-plugin-prettier": "^5.5.5",
+    "prettier": "^3.8.1",
+    "tsx": "^4.23.1",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.6",
+    "vitest": "^4.1.8"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "canvas",
+      "esbuild",
+      "protobufjs"
+    ],
+    "overrides": {
+      "@hono/node-server": "1.19.13",
+      "ajv@<7": "6.14.0",
+      "ajv@>=7": "8.20.0",
+      "brace-expansion": "5.0.6",
+      "esbuild": "0.28.1",
+      "express-rate-limit": "8.2.2",
+      "fast-uri": "3.1.2",
+      "fast-xml-builder": "1.2.0",
+      "fast-xml-parser": "5.7.3",
+      "flatted": "3.4.2",
+      "form-data": "4.0.6",
+      "hono": "4.12.25",
+      "ip-address": "10.2.0",
+      "js-yaml": "4.2.0",
+      "lodash": "4.18.1",
+      "minimatch": "10.2.4",
+      "path-to-regexp": "8.4.2",
+      "picomatch@<2.3.2": "2.3.2",
+      "picomatch@>=4.0.0 <4.0.4": "4.0.4",
+      "postcss": "8.5.14",
+      "protobufjs": "7.6.3",
+      "qs": "6.15.2",
+      "rollup": "4.59.0",
+      "tmp": "0.2.7",
+      "uuid": "11.1.1",
+      "ws": "8.21.0"
+    }
+  }
+}
