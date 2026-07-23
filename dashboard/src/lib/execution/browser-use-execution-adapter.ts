@@ -59,6 +59,10 @@ export class BrowserUseExecutionAdapter implements AgentExecutionService {
         durationMs,
         result,
         errorMessage: null,
+        events: [],
+        screenshots: [],
+        visitedUrls: [],
+        rawOutput: null,
       };
     } catch (error) {
       const completedAt = new Date();
@@ -81,6 +85,10 @@ export class BrowserUseExecutionAdapter implements AgentExecutionService {
         durationMs,
         result: null,
         errorMessage,
+        events: [],
+        screenshots: [],
+        visitedUrls: [],
+        rawOutput: null,
       };
     }
   }

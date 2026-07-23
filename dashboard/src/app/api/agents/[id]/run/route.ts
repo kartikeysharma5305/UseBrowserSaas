@@ -13,20 +13,6 @@ import { PrismaAgentExecutionService } from '@/lib/execution/prisma-agent-execut
 
 const runAgentBodySchema = z.object({}).strict();
 
-/**
- * POST /api/agents/[id]/run
- * Executes a browser automation agent asynchronously
- *
- * Authorization flow:
- * 1. Require authenticated session
- * 2. Validate agent ID format
- * 3. Verify user owns this agent (prevent cross-user access)
- * 4. Create Run record and start execution service
- *
- * Returns 202 Accepted (not 200) because execution is asynchronous.
- * The Run record is immediately created with status "PENDING"
- * and execution happens in the background.
- */
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -44,7 +30,6 @@ export async function POST(
     return handleValidationError(parsedId.error);
   }
 
-  // Prevent users from accessing agents they don't own
   const ownedAgent = await verifyAgentAccess(parsedId.data.id, user.id);
 
   if (!ownedAgent) {
@@ -64,9 +49,7 @@ export async function POST(
       userId: user.id,
     });
 
-    // 202 Accepted indicates async execution - Run was created
-    // and execution is in progress, not complete
-    return NextResponse.json({ data: result }, { status: 202 });
+    return NextResponse.json({ data: result });
   } catch (error) {
     return jsonError(
       error instanceof Error ? error.message : 'Unable to execute agent.',

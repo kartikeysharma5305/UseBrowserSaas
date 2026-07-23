@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useEffect, useRef, useState } from 'react';
 
 import { EmptyState } from '@/components/dashboard/empty-state';
 import { ErrorState } from '@/components/dashboard/error-state';
@@ -24,31 +24,64 @@ export default function RunsPage() {
   const [statusFilter, setStatusFilter] = useState('ALL');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  async function loadRuns() {
+    try {
+      const response = await fetch('/api/runs');
+
+      if (!response.ok) {
+        throw new Error('Unable to load runs.');
+      }
+
+      const payload = await response.json();
+      const data = Array.isArray(payload?.data) ? payload.data : [];
+      setRuns(data);
+
+      const hasRunning = data.some(
+        (run: Run) => run.status === 'QUEUED' || run.status === 'RUNNING'
+      );
+
+      if (hasRunning) {
+        setError(null);
+      }
+    } catch (loadError) {
+      setError(
+        loadError instanceof Error ? loadError.message : 'Unable to load runs.'
+      );
+    } finally {
+      setLoading(false);
+    }
+  }
 
   useEffect(() => {
-    async function loadRuns() {
-      try {
-        const response = await fetch('/api/runs');
-
-        if (!response.ok) {
-          throw new Error('Unable to load runs.');
-        }
-
-        const payload = await response.json();
-        setRuns(Array.isArray(payload?.data) ? payload.data : []);
-      } catch (loadError) {
-        setError(
-          loadError instanceof Error
-            ? loadError.message
-            : 'Unable to load runs.'
-        );
-      } finally {
-        setLoading(false);
-      }
-    }
-
     void loadRuns();
   }, []);
+
+  useEffect(() => {
+    const hasRunning = runs.some(
+      (run) => run.status === 'QUEUED' || run.status === 'RUNNING'
+    );
+
+    if (!hasRunning) {
+      if (pollTimerRef.current) {
+        clearInterval(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+      return;
+    }
+
+    pollTimerRef.current = setInterval(() => {
+      void loadRuns();
+    }, 2000);
+
+    return () => {
+      if (pollTimerRef.current) {
+        clearInterval(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+    };
+  }, [runs]);
 
   const filteredRuns = useMemo(() => {
     return runs.filter((run) => {

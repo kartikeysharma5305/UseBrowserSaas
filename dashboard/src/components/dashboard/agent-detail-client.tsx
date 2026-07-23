@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { EmptyState } from '@/components/dashboard/empty-state';
 import { ErrorState } from '@/components/dashboard/error-state';
@@ -41,11 +41,15 @@ type Run = {
   } | null;
 };
 
+const RUNNING_STATUSES = new Set(['QUEUED', 'RUNNING']);
+
 export function AgentDetailClient({ id }: { id: string }) {
   const [agent, setAgent] = useState<Agent | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [running, setRunning] = useState(false);
+  const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   async function loadAgentDetails() {
     try {
@@ -69,6 +73,9 @@ export function AgentDetailClient({ id }: { id: string }) {
 
       setAgent(currentAgent);
       setRuns(filteredRuns);
+      setRunning(
+        filteredRuns.some((run: Run) => RUNNING_STATUSES.has(run.status))
+      );
     } catch (loadError) {
       setError(
         loadError instanceof Error
@@ -84,7 +91,31 @@ export function AgentDetailClient({ id }: { id: string }) {
     void loadAgentDetails();
   }, [id]);
 
+  useEffect(() => {
+    if (!running) {
+      if (pollTimerRef.current) {
+        clearInterval(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+      return;
+    }
+
+    pollTimerRef.current = setInterval(() => {
+      void loadAgentDetails();
+    }, 2000);
+
+    return () => {
+      if (pollTimerRef.current) {
+        clearInterval(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+    };
+  }, [running]);
+
   async function runAgent() {
+    setError(null);
+    setRunning(true);
+
     try {
       const response = await fetch(`/api/agents/${id}/run`, {
         method: 'POST',
@@ -99,6 +130,7 @@ export function AgentDetailClient({ id }: { id: string }) {
 
       await loadAgentDetails();
     } catch (runError) {
+      setRunning(false);
       setError(
         runError instanceof Error ? runError.message : 'Unable to run agent.'
       );
@@ -156,10 +188,15 @@ export function AgentDetailClient({ id }: { id: string }) {
           <h1 className="text-3xl font-semibold text-slate-900">
             {agent.name}
           </h1>
+          {running && (
+            <p className="mt-1 text-sm text-blue-600">
+              Execution in progress... This page will refresh automatically.
+            </p>
+          )}
         </div>
         <div className="flex gap-2">
-          <Button variant="secondary" onClick={runAgent}>
-            Run Agent
+          <Button variant="secondary" onClick={runAgent} disabled={running}>
+            {running ? 'Running...' : 'Run Agent'}
           </Button>
           <Button variant="danger" onClick={deleteAgent}>
             Delete Agent

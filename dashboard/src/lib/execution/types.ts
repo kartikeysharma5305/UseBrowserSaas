@@ -5,6 +5,19 @@ export interface AgentExecutionInput {
   userId: string;
 }
 
+export interface ExecutionEvent {
+  type: string;
+  message: string;
+  data: Record<string, unknown>;
+  timestamp: Date;
+}
+
+export interface ExecutionScreenshot {
+  stepNumber: number | null;
+  path: string | null;
+  base64: string | null;
+}
+
 export interface AgentExecutionResult {
   runId: string;
   status: ExecutionStatus;
@@ -13,6 +26,10 @@ export interface AgentExecutionResult {
   durationMs: number | null;
   result: string | null;
   errorMessage: string | null;
+  events: ExecutionEvent[];
+  screenshots: ExecutionScreenshot[];
+  visitedUrls: string[];
+  rawOutput: unknown;
 }
 
 export interface AgentExecutionService {
