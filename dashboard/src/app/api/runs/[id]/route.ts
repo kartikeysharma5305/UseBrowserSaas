@@ -6,7 +6,8 @@ import {
   requireAuthenticatedUser,
   verifyRunAccess,
 } from '@/lib/api/route-helpers';
-import { agentIdSchema } from '@/lib/api/schemas';
+import { runIdSchema } from '@/lib/api/schemas';
+import { toRunApiRecord } from '@/lib/api/run-record';
 
 export async function GET(
   _request: NextRequest,
@@ -19,7 +20,7 @@ export async function GET(
   }
 
   const { id } = await params;
-  const parsed = agentIdSchema.safeParse({ id });
+  const parsed = runIdSchema.safeParse({ id });
 
   if (!parsed.success) {
     return handleValidationError(parsed.error);
@@ -31,5 +32,7 @@ export async function GET(
     return jsonError('Run not found.', 404);
   }
 
-  return NextResponse.json({ data: run });
+  return NextResponse.json({
+    data: toRunApiRecord(run),
+  });
 }

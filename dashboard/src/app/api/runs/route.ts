@@ -1,19 +1,23 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 
 import { jsonError, requireAuthenticatedUser } from '@/lib/api/route-helpers';
 import { prisma } from '@/lib/db/prisma';
+import { sanitizePersistedExecutionError } from '@/lib/execution/errors';
 
-export async function GET() {
+export async function GET(request: NextRequest) {
   const user = await requireAuthenticatedUser();
 
   if (!user) {
     return jsonError('Unauthorized.', 401);
   }
 
+  const agentId = request.nextUrl.searchParams.get('agentId') ?? undefined;
+
   const runs = await prisma.run.findMany({
     where: {
       agent: {
         userId: user.id,
+        ...(agentId ? { id: agentId } : {}),
       },
     },
     include: {
@@ -30,5 +34,20 @@ export async function GET() {
     },
   });
 
-  return NextResponse.json({ data: runs });
+  return NextResponse.json({
+    data: runs.map((run) => ({
+      id: run.id,
+      agentId: run.agentId,
+      status: run.status,
+      startedAt: run.startedAt,
+      completedAt: run.completedAt,
+      duration: run.duration,
+      result: run.result,
+      errorMessage: sanitizePersistedExecutionError(run.errorMessage),
+      queuedAt: run.queuedAt,
+      attempt: run.attempt,
+      createdAt: run.createdAt,
+      agent: run.agent,
+    })),
+  });
 }

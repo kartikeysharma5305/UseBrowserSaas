@@ -1,62 +1,24 @@
-import { AgentEventType, Prisma } from '@prisma/client';
+import { PrismaRunProducer, type EnqueuedRun } from '@/lib/queue/run-producer';
 
-import { prisma } from '@/lib/db/prisma';
-import { BrowserExecutionService } from '@/lib/browser/engine';
+import type { AgentExecutionInput } from './types';
+import { toExecutionServiceError } from './errors';
+import { recordAdmissionRejection } from '@/lib/operations/signals';
 
-import type { AgentExecutionInput, AgentExecutionResult } from './types';
-
+/**
+ * Compatibility facade for internal callers. Submission is always durable and
+ * never imports or launches the browser engine in the request process.
+ */
 export class PrismaAgentExecutionService {
-  private readonly browserExecutionService: BrowserExecutionService;
+  constructor(private readonly producer = new PrismaRunProducer()) {}
 
-  constructor() {
-    this.browserExecutionService = new BrowserExecutionService();
-  }
-
-  async runAgent(input: AgentExecutionInput): Promise<AgentExecutionResult> {
-    const agent = await prisma.agent.findUnique({
-      where: { id: input.agentId },
-    });
-
-    if (!agent) {
-      throw new Error('Agent not found.');
+  async runAgent(input: AgentExecutionInput): Promise<EnqueuedRun> {
+    try {
+      return await this.producer.enqueue(input);
+    } catch (error) {
+      recordAdmissionRejection(
+        toExecutionServiceError(error, 'EXECUTION_FAILED').code
+      );
+      throw error;
     }
-
-    const task = `${agent.goal} Navigate to ${agent.targetWebsite}.`;
-    const configuration =
-      (agent.configuration as {
-        model?: string;
-        maxSteps?: number;
-        timeoutMs?: number;
-        browserSettings?: {
-          headless?: boolean;
-          viewportWidth?: number;
-          viewportHeight?: number;
-        };
-      }) ?? {};
-
-    const model = configuration.model || 'gpt-4o-mini';
-    const maxSteps = configuration.maxSteps ?? 25;
-    const timeoutMs = configuration.timeoutMs ?? 60000;
-    const browserSettings = configuration.browserSettings ?? {
-      headless: true,
-      viewportWidth: 1280,
-      viewportHeight: 720,
-    };
-
-    return this.browserExecutionService.execute({
-      agentId: input.agentId,
-      userId: input.userId,
-      task,
-      configuration: {
-        model,
-        maxSteps,
-        timeoutMs,
-        browserSettings: {
-          headless: browserSettings.headless ?? true,
-          viewportWidth: browserSettings.viewportWidth ?? 1280,
-          viewportHeight: browserSettings.viewportHeight ?? 720,
-        },
-      },
-    });
   }
 }

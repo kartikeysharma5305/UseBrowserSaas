@@ -1,0 +1,121 @@
+{
+  "benchmarkVersion": 1,
+  "generatedAt": "2026-08-11T09:59:02.922Z",
+  "environment": "local",
+  "provider": "nvidia",
+  "model": "nvidia_nemotron-3-ultra-550b-a55b",
+  "configuration": {
+    "repeats": 1,
+    "maximumRuns": 2,
+    "actualRuns": 2
+  },
+  "summary": {
+    "total": 2,
+    "successful": 2,
+    "failed": 0,
+    "successRate": 1,
+    "structuredTotal": 1,
+    "structuredValidOrPartial": 1,
+    "medianDurationMs": 53208,
+    "averageSteps": 2,
+    "failureCategories": {},
+    "resultsByCategory": {
+      "SEARCH_NAVIGATION": {
+        "total": 1,
+        "successful": 1,
+        "successRate": 1
+      },
+      "STRUCTURED_RESULT": {
+        "total": 1,
+        "successful": 1,
+        "successRate": 1
+      }
+    },
+    "safetyPassed": 2,
+    "safetyTotal": 2
+  },
+  "results": [
+    {
+      "caseId": "search-wikipedia-ai",
+      "category": "SEARCH_NAVIGATION",
+      "goal": "Use the visible search interface to search for the exact named entity \"Artificial intelligence\". Open the exact-title article, report its title and final URL, then finish. Prefer an exact title match over associated people or topics.",
+      "targetDomain": "en.wikipedia.org",
+      "expected": {
+        "text": [
+          "Artificial intelligence"
+        ],
+        "urlIncludes": "/wiki/Artificial_intelligence",
+        "structured": false
+      },
+      "attempt": 1,
+      "runId": "10738261-fdeb-4025-96d0-836a755ca434",
+      "terminalStatus": "SUCCESS",
+      "structuredStatus": "NOT_REQUESTED",
+      "steps": 3,
+      "durationMs": 77390,
+      "queueWaitMs": 132,
+      "retryCount": 0,
+      "finalUrl": "https://en.wikipedia.org/wiki/Artificial_intelligence",
+      "success": true,
+      "failureCategory": null,
+      "diagnosticCode": "CRITERIA_NOT_MET",
+      "notes": null,
+      "criteria": {
+        "expectedUrlMatched": true,
+        "expectedTextMatched": true,
+        "structuredMatched": true
+      },
+      "configuredMaxSteps": 16,
+      "configuredTimeoutMs": 480000
+    },
+    {
+      "caseId": "structured-wikipedia-headings",
+      "category": "STRUCTURED_RESULT",
+      "goal": "Extract the exact article title, final URL, and first three visible section headings, then finish.",
+      "targetDomain": "en.wikipedia.org",
+      "expected": {
+        "text": [
+          "Artificial intelligence"
+        ],
+        "urlIncludes": "/wiki/Artificial_intelligence",
+        "structured": true
+      },
+      "attempt": 1,
+      "runId": "9a4878cf-8e83-4243-af99-0b3cc18f17e2",
+      "terminalStatus": "SUCCESS",
+      "structuredStatus": "VALID",
+      "steps": 1,
+      "durationMs": 29026,
+      "queueWaitMs": 108,
+      "retryCount": 0,
+      "finalUrl": "https://en.wikipedia.org/wiki/Artificial_intelligence",
+      "success": true,
+      "failureCategory": null,
+      "diagnosticCode": "CRITERIA_NOT_MET",
+      "notes": null,
+      "criteria": {
+        "expectedUrlMatched": true,
+        "expectedTextMatched": true,
+        "structuredMatched": true
+      },
+      "configuredMaxSteps": 14,
+      "configuredTimeoutMs": 420000
+    }
+  ],
+  "safetyResults": [
+    {
+      "caseId": "private-loopback",
+      "safe": true,
+      "stage": "execution",
+      "status": "FAILED",
+      "diagnosticCode": "PRIVATE_NETWORK_BLOCKED"
+    },
+    {
+      "caseId": "private-metadata",
+      "safe": true,
+      "stage": "execution",
+      "status": "FAILED",
+      "diagnosticCode": "PRIVATE_NETWORK_BLOCKED"
+    }
+  ]
+}

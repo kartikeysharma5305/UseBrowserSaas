@@ -19,12 +19,7 @@
       }
     ],
     "paths": {
-      "@/*": ["./src/*"],
-      "browser-use": ["../../src/index.ts"],
-      "browser-use/agent": ["../../src/agent/index.ts"],
-      "browser-use/browser": ["../../src/browser/index.ts"],
-      "browser-use/llm/models": ["../../src/llm/models.ts"],
-      "browser-use/llm/base": ["../../src/llm/base.ts"]
+      "@/*": ["./src/*"]
     }
   },
   "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],

@@ -38,6 +38,7 @@ export interface ChatOpenAIOptions {
   reasoningEffort?: 'low' | 'medium' | 'high';
   serviceTier?: 'auto' | 'default' | 'flex' | 'priority' | 'scale' | null;
   maxCompletionTokens?: number | null;
+  completionTokenParameter?: 'max_completion_tokens' | 'max_tokens';
   maxRetries?: number;
   defaultHeaders?: Record<string, string> | null;
   defaultQuery?: Record<string, string | undefined> | null;
@@ -50,6 +51,7 @@ export interface ChatOpenAIOptions {
   removeMinItemsFromSchema?: boolean;
   removeDefaultsFromSchema?: boolean;
   reasoningModels?: string[] | null;
+  extraBody?: Record<string, unknown> | null;
 }
 
 export class ChatOpenAI implements BaseChatModel {
@@ -67,6 +69,7 @@ export class ChatOpenAI implements BaseChatModel {
     | 'scale'
     | null;
   private maxCompletionTokens: number | null;
+  private completionTokenParameter: 'max_completion_tokens' | 'max_tokens';
   private seed: number | null;
   private topP: number | null;
   private addSchemaToSystemPrompt: boolean;
@@ -74,6 +77,7 @@ export class ChatOpenAI implements BaseChatModel {
   private removeMinItemsFromSchema: boolean;
   private removeDefaultsFromSchema: boolean;
   private reasoningModels: string[] | null;
+  private extraBody: Record<string, unknown>;
 
   constructor(options: ChatOpenAIOptions = {}) {
     const {
@@ -88,6 +92,7 @@ export class ChatOpenAI implements BaseChatModel {
       reasoningEffort = 'low',
       serviceTier = null,
       maxCompletionTokens = 4096,
+      completionTokenParameter = 'max_completion_tokens',
       maxRetries = 5,
       defaultHeaders = null,
       defaultQuery = null,
@@ -100,6 +105,7 @@ export class ChatOpenAI implements BaseChatModel {
       removeMinItemsFromSchema = false,
       removeDefaultsFromSchema = false,
       reasoningModels = DEFAULT_REASONING_MODELS,
+      extraBody = null,
     } = options;
 
     this.model = model;
@@ -108,6 +114,7 @@ export class ChatOpenAI implements BaseChatModel {
     this.reasoningEffort = reasoningEffort;
     this.serviceTier = serviceTier;
     this.maxCompletionTokens = maxCompletionTokens;
+    this.completionTokenParameter = completionTokenParameter;
     this.seed = seed;
     this.topP = topP;
     this.addSchemaToSystemPrompt = addSchemaToSystemPrompt;
@@ -117,6 +124,7 @@ export class ChatOpenAI implements BaseChatModel {
     this.reasoningModels = reasoningModels
       ? [...reasoningModels]
       : reasoningModels;
+    this.extraBody = { ...(extraBody ?? {}) };
 
     this.client = new OpenAI({
       apiKey,
@@ -203,7 +211,7 @@ export class ChatOpenAI implements BaseChatModel {
     }
 
     if (this.maxCompletionTokens !== null) {
-      modelParams.max_completion_tokens = this.maxCompletionTokens;
+      modelParams[this.completionTokenParameter] = this.maxCompletionTokens;
     }
     if (this.seed !== null) {
       modelParams.seed = this.seed;
@@ -296,6 +304,7 @@ export class ChatOpenAI implements BaseChatModel {
           messages: openaiMessages,
           response_format: responseFormat,
           ...modelParams,
+          ...this.extraBody,
         },
         options.signal ? { signal: options.signal } : undefined
       );
@@ -306,7 +315,7 @@ export class ChatOpenAI implements BaseChatModel {
         {
           model: this.model,
           tokenLimit: this.maxCompletionTokens,
-          tokenLimitName: 'max_completion_tokens',
+          tokenLimitName: this.completionTokenParameter,
         }
       );
       const content = response.choices[0].message.content || '';

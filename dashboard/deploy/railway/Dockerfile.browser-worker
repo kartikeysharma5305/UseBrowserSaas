@@ -1,0 +1,20 @@
+FROM mcr.microsoft.com/playwright:v1.58.2-noble
+
+ENV PNPM_HOME=/pnpm
+ENV PATH=/pnpm:$PATH
+ENV NODE_ENV=production
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+ENV IN_DOCKER=true
+
+RUN corepack enable && corepack prepare pnpm@10.28.1 --activate
+
+WORKDIR /app
+
+COPY package.json pnpm-lock.yaml .npmrc ./
+COPY dashboard/package.json dashboard/pnpm-lock.yaml ./dashboard/
+RUN pnpm install --frozen-lockfile && pnpm --dir dashboard install --frozen-lockfile
+
+COPY . .
+RUN pnpm production:build
+
+CMD ["pnpm", "start:worker"]

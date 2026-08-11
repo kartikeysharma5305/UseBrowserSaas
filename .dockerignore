@@ -1,0 +1,12 @@
+.git
+.gitignore
+**/node_modules
+dist
+dashboard/.next
+dashboard/.env
+dashboard/.env.*
+dashboard/benchmark-results
+dashboard/backups
+dashboard/artifacts
+coverage
+*.log

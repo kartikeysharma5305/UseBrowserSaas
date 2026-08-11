@@ -1,0 +1,37 @@
+name: browser-use-dev
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: browser_use_dashboard
+      POSTGRES_USER: browser_use
+      POSTGRES_PASSWORD: browser_use_dev
+    ports:
+      - '127.0.0.1:5432:5432'
+    volumes:
+      - browser-use-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U browser_use -d browser_use_dashboard']
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ['redis-server', '--appendonly', 'yes']
+    ports:
+      - '127.0.0.1:6379:6379'
+    volumes:
+      - browser-use-redis:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+volumes:
+  browser-use-postgres:
+  browser-use-redis:

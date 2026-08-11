@@ -1,0 +1,24 @@
+[Unit]
+Description=Browser Automation SaaS dashboard
+After=network-online.target postgresql.service redis-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=browser-use
+Group=browser-use
+WorkingDirectory=/opt/browser-use/dashboard
+Environment=NODE_ENV=production
+Environment=PORT=3001
+EnvironmentFile=/etc/browser-use/dashboard.env
+ExecStart=/usr/bin/pnpm start:dashboard
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+KillSignal=SIGTERM
+KillMode=mixed
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

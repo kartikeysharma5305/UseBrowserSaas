@@ -1,37 +1,65 @@
-import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 
-// mock Next.js server-only virtual module used in billing codepaths
-vi.mock('server-only', () => ({}));
+import { assertBillingEnabled, getBillingConfig } from '@/lib/billing/config';
 
-const OLD_ENV = { ...process.env };
+const originalEnv = { ...process.env };
 
-describe('billing config and price catalogue', () => {
-  afterEach(() => {
-    process.env = { ...OLD_ENV };
-  });
+beforeEach(() => {
+  process.env = { ...originalEnv };
+});
 
-  it('returns disabled config when BILLING_ENABLED is false', async () => {
+describe('billing config', () => {
+  it('returns disabled billing config when billing is off', () => {
     process.env.BILLING_ENABLED = 'false';
-    const { getBillingConfig } = await import('../dashboard/src/lib/billing/config.js');
-    const cfg = getBillingConfig();
-    expect(cfg.enabled).toBe(false);
+    delete process.env.STRIPE_SECRET_KEY;
+    delete process.env.STRIPE_WEBHOOK_SECRET;
+    delete process.env.STRIPE_PRO_MONTHLY_PRICE_ID;
+
+    const config = getBillingConfig();
+
+    expect(config.enabled).toBe(false);
+    expect(config.testMode).toBe(true);
+    expect(config.billingEnabled).toBeUndefined();
   });
 
-  it('maps configured STRIPE_PRO_MONTHLY_PRICE_ID to PRO plan when billing enabled', async () => {
+  it('validates Stripe configuration when billing is enabled', () => {
     process.env.BILLING_ENABLED = 'true';
-    // minimal required env for config validation
-    process.env.STRIPE_SECRET_KEY = 'sk_test_123456';
-    process.env.STRIPE_WEBHOOK_SECRET = 'whsec_test';
-    process.env.STRIPE_PRO_MONTHLY_PRICE_ID = 'price_test_abcdef';
+    process.env.STRIPE_SECRET_KEY = 'sk_test_123';
+    process.env.STRIPE_WEBHOOK_SECRET = 'whsec_123';
+    process.env.STRIPE_PRO_MONTHLY_PRICE_ID = 'price_123';
     process.env.STRIPE_CHECKOUT_SUCCESS_URL = 'http://localhost:3001/dashboard/billing?checkout=success';
     process.env.STRIPE_CHECKOUT_CANCEL_URL = 'http://localhost:3001/dashboard/billing?checkout=canceled';
     process.env.STRIPE_PORTAL_RETURN_URL = 'http://localhost:3001/dashboard/billing';
 
-    const { getStripePriceForPlan, planCodeForStripePrice } = await import('../dashboard/src/lib/billing/price-catalogue.js');
+    const config = getBillingConfig();
 
-    const price = getStripePriceForPlan('PRO');
-    expect(price.priceId).toBe(process.env.STRIPE_PRO_MONTHLY_PRICE_ID);
-    const mapped = planCodeForStripePrice(process.env.STRIPE_PRO_MONTHLY_PRICE_ID!);
-    expect(mapped).toBe('PRO');
+    expect(config.enabled).toBe(true);
+    expect(config.secretKey).toBe('sk_test_123');
+    expect(config.webhookSecret).toBe('whsec_123');
+    expect(config.proMonthlyPriceId).toBe('price_123');
+  });
+
+  it('throws when enabled and Stripe price ID is invalid', () => {
+    process.env.BILLING_ENABLED = 'true';
+    process.env.STRIPE_SECRET_KEY = 'sk_test_123';
+    process.env.STRIPE_WEBHOOK_SECRET = 'whsec_123';
+    process.env.STRIPE_PRO_MONTHLY_PRICE_ID = 'invalid-price';
+    process.env.STRIPE_CHECKOUT_SUCCESS_URL = 'http://localhost:3001/dashboard/billing?checkout=success';
+    process.env.STRIPE_CHECKOUT_CANCEL_URL = 'http://localhost:3001/dashboard/billing?checkout=canceled';
+    process.env.STRIPE_PORTAL_RETURN_URL = 'http://localhost:3001/dashboard/billing';
+
+    expect(() => getBillingConfig()).toThrow(/STRIPE_PRO_MONTHLY_PRICE_ID must be a Stripe price ID/);
+  });
+
+  it('throws when enabled and checkout URL origin does not match app origin', () => {
+    process.env.BILLING_ENABLED = 'true';
+    process.env.STRIPE_SECRET_KEY = 'sk_test_123';
+    process.env.STRIPE_WEBHOOK_SECRET = 'whsec_123';
+    process.env.STRIPE_PRO_MONTHLY_PRICE_ID = 'price_123';
+    process.env.STRIPE_CHECKOUT_SUCCESS_URL = 'http://example.com/checkout-success';
+    process.env.STRIPE_CHECKOUT_CANCEL_URL = 'http://localhost:3001/dashboard/billing?checkout=canceled';
+    process.env.STRIPE_PORTAL_RETURN_URL = 'http://localhost:3001/dashboard/billing';
+
+    expect(() => getBillingConfig()).toThrow(/STRIPE_CHECKOUT_SUCCESS_URL must use the configured application origin/);
   });
 });

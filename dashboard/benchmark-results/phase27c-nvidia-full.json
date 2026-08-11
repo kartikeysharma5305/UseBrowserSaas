@@ -1,0 +1,898 @@
+{
+  "benchmarkVersion": 1,
+  "generatedAt": "2026-08-11T10:33:55.581Z",
+  "environment": "local",
+  "provider": "nvidia",
+  "model": "nvidia_nemotron-3-ultra-550b-a55b",
+  "configuration": {
+    "repeats": 2,
+    "maximumRuns": 24,
+    "actualRuns": 24
+  },
+  "summary": {
+    "total": 24,
+    "successful": 23,
+    "failed": 1,
+    "successRate": 0.9583333333333334,
+    "structuredTotal": 6,
+    "structuredValidOrPartial": 6,
+    "medianDurationMs": 50789,
+    "averageSteps": 2.8333333333333335,
+    "failureCategories": {
+      "STEP_LIMIT": 1
+    },
+    "resultsByCategory": {
+      "DIRECT_EXTRACTION": {
+        "total": 6,
+        "successful": 5,
+        "successRate": 0.8333333333333334
+      },
+      "FORM_INTERACTION": {
+        "total": 2,
+        "successful": 2,
+        "successRate": 1
+      },
+      "MULTI_PAGE": {
+        "total": 4,
+        "successful": 4,
+        "successRate": 1
+      },
+      "SEARCH_NAVIGATION": {
+        "total": 6,
+        "successful": 6,
+        "successRate": 1
+      },
+      "STRUCTURED_RESULT": {
+        "total": 6,
+        "successful": 6,
+        "successRate": 1
+      }
+    },
+    "safetyPassed": 2,
+    "safetyTotal": 2
+  },
+  "results": [
+    {
+      "caseId": "direct-example-title",
+      "category": "DIRECT_EXTRACTION",
+      "goal": "Open the public page, report its exact page title and the destination of the More information link, then finish.",
+      "targetDomain": "example.com",
+      "expected": {
+        "text": [
+          "Example Domain",
+          "iana.org"
+        ],
+        "urlIncludes": "example.com",
+        "structured": false
+      },
+      "attempt": 1,
+      "runId": "fbdb1544-5777-4b50-bc20-5ef3f9c1cb8d",
+      "terminalStatus": "FAILED",
+      "structuredStatus": "NOT_REQUESTED",
+      "steps": 9,
+      "durationMs": 119241,
+      "queueWaitMs": 100,
+      "retryCount": 0,
+      "tokenUsage": null,
+      "finalUrl": null,
+      "success": false,
+      "failureCategory": "STEP_LIMIT",
+      "diagnosticCode": "EXECUTION_STEP_LIMIT_EXCEEDED",
+      "notes": null,
+      "criteria": {
+        "expectedUrlMatched": false,
+        "expectedTextMatched": false,
+        "structuredMatched": true
+      },
+      "configuredMaxSteps": 10,
+      "configuredTimeoutMs": 300000
+    },
+    {
+      "caseId": "direct-example-title",
+      "category": "DIRECT_EXTRACTION",
+      "goal": "Open the public page, report its exact page title and the destination of the More information link, then finish.",
+      "targetDomain": "example.com",
+      "expected": {
+        "text": [
+          "Example Domain",
+          "iana.org"
+        ],
+        "urlIncludes": "example.com",
+        "structured": false
+      },
+      "attempt": 2,
+      "runId": "fb3ebf9e-1066-456b-989f-6e2adbd446d4",
+      "terminalStatus": "SUCCESS",
+      "structuredStatus": "NOT_REQUESTED",
+      "steps": 2,
+      "durationMs": 49223,
+      "queueWaitMs": 113,
+      "retryCount": 0,
+      "tokenUsage": null,
+      "finalUrl": "https://example.com/",
+      "success": true,
+      "failureCategory": null,
+      "diagnosticCode": null,
+      "notes": null,
+      "criteria": {
+        "expectedUrlMatched": true,
+        "expectedTextMatched": true,
+        "structuredMatched": true
+      },
+      "configuredMaxSteps": 10,
+      "configuredTimeoutMs": 300000
+    },
+    {
+      "caseId": "direct-wikipedia-ai",
+      "category": "DIRECT_EXTRACTION",
+      "goal": "Report the exact article title, a two-sentence introduction summary, and the first three visible section headings, then finish.",
+      "targetDomain": "en.wikipedia.org",
+      "expected": {
+        "text": [
+          "Artificial intelligence"
+        ],
+        "urlIncludes": "/wiki/Artificial_intelligence",
+        "structured": false
+      },
+      "attempt": 1,
+      "runId": "3e3fed59-0a29-4dad-9ba2-50f082976018",
+      "terminalStatus": "SUCCESS",
+      "structuredStatus": "NOT_REQUESTED",
+      "steps": 1,
+      "durationMs": 77652,
+      "queueWaitMs": 153,
+      "retryCount": 0,
+      "tokenUsage": null,
+      "finalUrl": "https://en.wikipedia.org/wiki/Artificial_intelligence",
+      "success": true,
+      "failureCategory": null,
+      "diagnosticCode": null,
+      "notes": null,
+      "criteria": {
+        "expectedUrlMatched": true,
+        "expectedTextMatched": true,
+        "structuredMatched": true
+      },
+      "configuredMaxSteps": 14,
+      "configuredTimeoutMs": 420000
+    },
+    {
+      "caseId": "direct-wikipedia-ai",
+      "category": "DIRECT_EXTRACTION",
+      "goal": "Report the exact article title, a two-sentence introduction summary, and the first three visible section headings, then finish.",
+      "targetDomain": "en.wikipedia.org",
+      "expected": {
+        "text": [
+          "Artificial intelligence"
+        ],
+        "urlIncludes": "/wiki/Artificial_intelligence",
+        "structured": false
+      },
+      "attempt": 2,
+      "runId": "c9c0af02-8fe4-4e40-9984-cfb43040ac9e",
+      "terminalStatus": "SUCCESS",
+      "structuredStatus": "NOT_REQUESTED",
+      "steps": 1,
+      "durationMs": 35139,
+      "queueWaitMs": 114,
+      "retryCount": 0,
+      "tokenUsage": null,
+      "finalUrl": "https://en.wikipedia.org/wiki/Artificial_intelligence",
+      "success": true,
+      "failureCategory": null,
+      "diagnosticCode": null,
+      "notes": null,
+      "criteria": {
+        "expectedUrlMatched": true,
+        "expectedTextMatched": true,
+        "structuredMatched": true
+      },
+      "configuredMaxSteps": 14,
+      "configuredTimeoutMs": 420000
+    },
+    {
+      "caseId": "direct-wikipedia-typescript",
+      "category": "DIRECT_EXTRACTION",
+      "goal": "Report the exact article title, who developed it, and the year it first appeared, then finish.",
+      "targetDomain": "en.wikipedia.org",
+      "expected": {
+        "text": [
+          "TypeScript",
+          "Microsoft",
+          "2012"
+        ],
+        "urlIncludes": "/wiki/TypeScript",
+        "structured": false
+      },
+      "attempt": 1,
+      "runId": "6ec4886d-2d4b-4fca-974d-66d2728b22c6",
+      "terminalStatus": "SUCCESS",
+      "structuredStatus": "NOT_REQUESTED",
+      "steps": 1,
+      "durationMs": 18263,
+      "queueWaitMs": 92,
+      "retryCount": 0,
+      "tokenUsage": null,
+      "finalUrl": "https://en.wikipedia.org/wiki/TypeScript",
+      "success": true,
+      "failureCategory": null,
+      "diagnosticCode": null,
+      "notes": null,
+      "criteria": {
+        "expectedUrlMatched": true,
+        "expectedTextMatched": true,
+        "structuredMatched": true
+      },
+      "configuredMaxSteps": 14,
+      "configuredTimeoutMs": 420000
+    },
+    {
+      "caseId": "direct-wikipedia-typescript",
+      "category": "DIRECT_EXTRACTION",
+      "goal": "Report the exact article title, who developed it, and the year it first appeared, then finish.",
+      "targetDomain": "en.wikipedia.org",
+      "expected": {
+        "text": [
+          "TypeScript",
+          "Microsoft",
+          "2012"
+        ],
+        "urlIncludes": "/wiki/TypeScript",
+        "structured": false
+      },
+      "attempt": 2,
+      "runId": "6f64270a-16aa-48dc-ad11-bffe0b834d6b",
+      "terminalStatus": "SUCCESS",
+      "structuredStatus": "NOT_REQUESTED",
+      "steps": 1,
+      "durationMs": 23306,
+      "queueWaitMs": 82,
+      "retryCount": 0,
+      "tokenUsage": null,
+      "finalUrl": "https://en.wikipedia.org/wiki/TypeScript",
+      "success": true,
+      "failureCategory": null,
+      "diagnosticCode": null,
+      "notes": null,
+      "criteria": {
+        "expectedUrlMatched": true,
+        "expectedTextMatched": true,
+        "structuredMatched": true
+      },
+      "configuredMaxSteps": 14,
+      "configuredTimeoutMs": 420000
+    },
+    {
+      "caseId": "search-wikipedia-ai",
+      "category": "SEARCH_NAVIGATION",
+      "goal": "Use the visible search interface to search for the exact named entity \"Artificial intelligence\". Open the exact-title article, report its title and final URL, then finish. Prefer an exact title match over associated people or topics.",
+      "targetDomain": "en.wikipedia.org",
+      "expected": {
+        "text": [
+          "Artificial intelligence"
+        ],
+        "urlIncludes": "/wiki/Artificial_intelligence",
+        "structured": false
+      },
+      "attempt": 1,
+      "runId": "c3bc9cdf-602d-4dfb-a86c-124319565cf4",
+      "terminalStatus": "SUCCESS",
+      "structuredStatus": "NOT_REQUESTED",
+      "steps": 3,
+      "durationMs": 83562,
+      "queueWaitMs": 44,
+      "retryCount": 0,
+      "tokenUsage": null,
+      "finalUrl": "https://en.wikipedia.org/wiki/Artificial_intelligence",
+      "success": true,
+      "failureCategory": null,
+      "diagnosticCode": null,
+      "notes": null,
+      "criteria": {
+        "expectedUrlMatched": true,
+        "expectedTextMatched": true,
+        "structuredMatched": true
+      },
+      "configuredMaxSteps": 16,
+      "configuredTimeoutMs": 480000
+    },
+    {
+      "caseId": "search-wikipedia-ai",
+      "category": "SEARCH_NAVIGATION",
+      "goal": "Use the visible search interface to search for the exact named entity \"Artificial intelligence\". Open the exact-title article, report its title and final URL, then finish. Prefer an exact title match over associated people or topics.",
+      "targetDomain": "en.wikipedia.org",
+      "expected": {
+        "text": [
+          "Artificial intelligence"
+        ],
+        "urlIncludes": "/wiki/Artificial_intelligence",
+        "structured": false
+      },
+      "attempt": 2,
+      "runId": "ccaf3af9-f998-46f9-8592-aca25ab74a00",
+      "terminalStatus": "SUCCESS",
+      "structuredStatus": "NOT_REQUESTED",
+      "steps": 3,
+      "durationMs": 56526,
+      "queueWaitMs": 59,
+      "retryCount": 0,
+      "tokenUsage": null,
+      "finalUrl": "https://en.wikipedia.org/wiki/Artificial_intelligence",
+      "success": true,
+      "failureCategory": null,
+      "diagnosticCode": null,
+      "notes": null,
+      "criteria": {
+        "expectedUrlMatched": true,
+        "expectedTextMatched": true,
+        "structuredMatched": true
+      },
+      "configuredMaxSteps": 16,
+      "configuredTimeoutMs": 480000
+    },
+    {
+      "caseId": "search-wikipedia-turing",
+      "category": "SEARCH_NAVIGATION",
+      "goal": "Use the visible search interface to search for the exact named entity \"Alan Turing\". Open the exact-title article, report its title and final URL, then finish.",
+      "targetDomain": "en.wikipedia.org",
+      "expected": {
+        "text": [
+          "Alan Turing"
+        ],
+        "urlIncludes": "/wiki/Alan_Turing",
+        "structured": false
+      },
+      "attempt": 1,
+      "runId": "f7b76f29-efa9-4dd5-9a54-3f60f7b72704",
+      "terminalStatus": "SUCCESS",
+      "structuredStatus": "NOT_REQUESTED",
+      "steps": 3,
+      "durationMs": 75623,
+      "queueWaitMs": 155,
+      "retryCount": 0,
+      "tokenUsage": null,
+      "finalUrl": "https://en.wikipedia.org/wiki/Alan_Turing",
+      "success": true,
+      "failureCategory": null,
+      "diagnosticCode": null,
+      "notes": null,
+      "criteria": {
+        "expectedUrlMatched": true,
+        "expectedTextMatched": true,
+        "structuredMatched": true
+      },
+      "configuredMaxSteps": 16,
+      "configuredTimeoutMs": 480000
+    },
+    {
+      "caseId": "search-wikipedia-turing",
+      "category": "SEARCH_NAVIGATION",
+      "goal": "Use the visible search interface to search for the exact named entity \"Alan Turing\". Open the exact-title article, report its title and final URL, then finish.",
+      "targetDomain": "en.wikipedia.org",
+      "expected": {
+        "text": [
+          "Alan Turing"
+        ],
+        "urlIncludes": "/wiki/Alan_Turing",
+        "structured": false
+      },
+      "attempt": 2,
+      "runId": "9b62c28d-479b-43ad-8cc1-21114989f34e",
+      "terminalStatus": "SUCCESS",
+      "structuredStatus": "NOT_REQUESTED",
+      "steps": 3,
+      "durationMs": 52879,
+      "queueWaitMs": 155,
+      "retryCount": 0,
+      "tokenUsage": null,
+      "finalUrl": "https://en.wikipedia.org/wiki/Alan_Turing",
+      "success": true,
+      "failureCategory": null,
+      "diagnosticCode": null,
+      "notes": null,
+      "criteria": {
+        "expectedUrlMatched": true,
+        "expectedTextMatched": true,
+        "structuredMatched": true
+      },
+      "configuredMaxSteps": 16,
+      "configuredTimeoutMs": 480000
+    },
+    {
+      "caseId": "navigate-wikipedia-machine-learning",
+      "category": "SEARCH_NAVIGATION",
+      "goal": "Follow a visible article link to the exact \"Machine learning\" article. Report the destination title and final URL, then finish.",
+      "targetDomain": "en.wikipedia.org",
+      "expected": {
+        "text": [
+          "Machine learning"
+        ],
+        "urlIncludes": "/wiki/Machine_learning",
+        "structured": false
+      },
+      "attempt": 1,
+      "runId": "0886504c-29e0-4ace-99a8-715cf5d84c1c",
+      "terminalStatus": "SUCCESS",
+      "structuredStatus": "NOT_REQUESTED",
+      "steps": 2,
+      "durationMs": 60181,
+      "queueWaitMs": 50,
+      "retryCount": 0,
+      "tokenUsage": null,
+      "finalUrl": "https://en.wikipedia.org/wiki/Machine_learning",
+      "success": true,
+      "failureCategory": null,
+      "diagnosticCode": null,
+      "notes": null,
+      "criteria": {
+        "expectedUrlMatched": true,
+        "expectedTextMatched": true,
+        "structuredMatched": true
+      },
+      "configuredMaxSteps": 14,
+      "configuredTimeoutMs": 420000
+    },
+    {
+      "caseId": "navigate-wikipedia-machine-learning",
+      "category": "SEARCH_NAVIGATION",
+      "goal": "Follow a visible article link to the exact \"Machine learning\" article. Report the destination title and final URL, then finish.",
+      "targetDomain": "en.wikipedia.org",
+      "expected": {
+        "text": [
+          "Machine learning"
+        ],
+        "urlIncludes": "/wiki/Machine_learning",
+        "structured": false
+      },
+      "attempt": 2,
+      "runId": "6a89c70a-23df-41de-aa75-29810e160d6e",
+      "terminalStatus": "SUCCESS",
+      "structuredStatus": "NOT_REQUESTED",
+      "steps": 2,
+      "durationMs": 45327,
+      "queueWaitMs": 65,
+      "retryCount": 0,
+      "tokenUsage": null,
+      "finalUrl": "https://en.wikipedia.org/wiki/Machine_learning",
+      "success": true,
+      "failureCategory": null,
+      "diagnosticCode": null,
+      "notes": null,
+      "criteria": {
+        "expectedUrlMatched": true,
+        "expectedTextMatched": true,
+        "structuredMatched": true
+      },
+      "configuredMaxSteps": 14,
+      "configuredTimeoutMs": 420000
+    },
+    {
+      "caseId": "compare-wikipedia-ai-ml",
+      "category": "MULTI_PAGE",
+      "goal": "Using only English Wikipedia, visit the Artificial intelligence and Machine learning articles. Report both exact titles and one concise factual distinction supported by their introductions, then finish.",
+      "targetDomain": "en.wikipedia.org",
+      "expected": {
+        "text": [
+          "Artificial intelligence",
+          "Machine learning"
+        ],
+        "urlIncludes": "/wiki/Machine_learning",
+        "structured": false
+      },
+      "attempt": 1,
+      "runId": "c74172ad-45fc-47e0-b0a6-eebcb3c2e0ea",
+      "terminalStatus": "SUCCESS",
+      "structuredStatus": "NOT_REQUESTED",
+      "steps": 2,
+      "durationMs": 60869,
+      "queueWaitMs": 62,
+      "retryCount": 0,
+      "tokenUsage": null,
+      "finalUrl": "https://en.wikipedia.org/wiki/Machine_learning",
+      "success": true,
+      "failureCategory": null,
+      "diagnosticCode": null,
+      "notes": null,
+      "criteria": {
+        "expectedUrlMatched": true,
+        "expectedTextMatched": true,
+        "structuredMatched": true
+      },
+      "configuredMaxSteps": 18,
+      "configuredTimeoutMs": 540000
+    },
+    {
+      "caseId": "compare-wikipedia-ai-ml",
+      "category": "MULTI_PAGE",
+      "goal": "Using only English Wikipedia, visit the Artificial intelligence and Machine learning articles. Report both exact titles and one concise factual distinction supported by their introductions, then finish.",
+      "targetDomain": "en.wikipedia.org",
+      "expected": {
+        "text": [
+          "Artificial intelligence",
+          "Machine learning"
+        ],
+        "urlIncludes": "/wiki/Machine_learning",
+        "structured": false
+      },
+      "attempt": 2,
+      "runId": "584ba974-d8df-4a7c-bc61-1b9b78bad877",
+      "terminalStatus": "SUCCESS",
+      "structuredStatus": "NOT_REQUESTED",
+      "steps": 4,
+      "durationMs": 128851,
+      "queueWaitMs": 126,
+      "retryCount": 0,
+      "tokenUsage": null,
+      "finalUrl": "https://en.wikipedia.org/wiki/Machine_learning",
+      "success": true,
+      "failureCategory": null,
+      "diagnosticCode": null,
+      "notes": null,
+      "criteria": {
+        "expectedUrlMatched": true,
+        "expectedTextMatched": true,
+        "structuredMatched": true
+      },
+      "configuredMaxSteps": 18,
+      "configuredTimeoutMs": 540000
+    },
+    {
+      "caseId": "collect-wikipedia-links",
+      "category": "MULTI_PAGE",
+      "goal": "Collect the exact titles and URLs of three directly linked Wikipedia articles about AI subfields. Return exactly three items, then finish.",
+      "targetDomain": "en.wikipedia.org",
+      "expected": {
+        "text": [
+          "http",
+          "wiki"
+        ],
+        "urlIncludes": "/wiki/Artificial_intelligence",
+        "structured": false
+      },
+      "attempt": 1,
+      "runId": "f0412d89-f29a-4429-ac1d-514e17f2b35a",
+      "terminalStatus": "SUCCESS",
+      "structuredStatus": "NOT_REQUESTED",
+      "steps": 6,
+      "durationMs": 102129,
+      "queueWaitMs": 51,
+      "retryCount": 0,
+      "tokenUsage": null,
+      "finalUrl": "https://en.wikipedia.org/wiki/Robotics",
+      "success": true,
+      "failureCategory": null,
+      "diagnosticCode": null,
+      "notes": null,
+      "criteria": {
+        "expectedUrlMatched": true,
+        "expectedTextMatched": true,
+        "structuredMatched": true
+      },
+      "configuredMaxSteps": 16,
+      "configuredTimeoutMs": 480000
+    },
+    {
+      "caseId": "collect-wikipedia-links",
+      "category": "MULTI_PAGE",
+      "goal": "Collect the exact titles and URLs of three directly linked Wikipedia articles about AI subfields. Return exactly three items, then finish.",
+      "targetDomain": "en.wikipedia.org",
+      "expected": {
+        "text": [
+          "http",
+          "wiki"
+        ],
+        "urlIncludes": "/wiki/Artificial_intelligence",
+        "structured": false
+      },
+      "attempt": 2,
+      "runId": "6f0dfb6e-cd65-4005-ba39-7f8fd926f1d3",
+      "terminalStatus": "SUCCESS",
+      "structuredStatus": "NOT_REQUESTED",
+      "steps": 13,
+      "durationMs": 246047,
+      "queueWaitMs": 62,
+      "retryCount": 0,
+      "tokenUsage": null,
+      "finalUrl": "https://en.wikipedia.org/wiki/Artificial_intelligence",
+      "success": true,
+      "failureCategory": null,
+      "diagnosticCode": null,
+      "notes": null,
+      "criteria": {
+        "expectedUrlMatched": true,
+        "expectedTextMatched": true,
+        "structuredMatched": true
+      },
+      "configuredMaxSteps": 16,
+      "configuredTimeoutMs": 480000
+    },
+    {
+      "caseId": "form-wikipedia-typescript",
+      "category": "FORM_INTERACTION",
+      "goal": "Use the Wikipedia search form to search for \"TypeScript\", open the exact-title result, report the page title, then finish.",
+      "targetDomain": "en.wikipedia.org",
+      "expected": {
+        "text": [
+          "TypeScript"
+        ],
+        "urlIncludes": "/wiki/TypeScript",
+        "structured": false
+      },
+      "attempt": 1,
+      "runId": "3ebf058a-a5d4-46a7-a3d2-967635d82c12",
+      "terminalStatus": "SUCCESS",
+      "structuredStatus": "NOT_REQUESTED",
+      "steps": 3,
+      "durationMs": 42982,
+      "queueWaitMs": 70,
+      "retryCount": 0,
+      "tokenUsage": null,
+      "finalUrl": "https://en.wikipedia.org/wiki/TypeScript",
+      "success": true,
+      "failureCategory": null,
+      "diagnosticCode": null,
+      "notes": null,
+      "criteria": {
+        "expectedUrlMatched": true,
+        "expectedTextMatched": true,
+        "structuredMatched": true
+      },
+      "configuredMaxSteps": 16,
+      "configuredTimeoutMs": 480000
+    },
+    {
+      "caseId": "form-wikipedia-typescript",
+      "category": "FORM_INTERACTION",
+      "goal": "Use the Wikipedia search form to search for \"TypeScript\", open the exact-title result, report the page title, then finish.",
+      "targetDomain": "en.wikipedia.org",
+      "expected": {
+        "text": [
+          "TypeScript"
+        ],
+        "urlIncludes": "/wiki/TypeScript",
+        "structured": false
+      },
+      "attempt": 2,
+      "runId": "94058c57-b028-443a-a3e5-851ae7e7054b",
+      "terminalStatus": "SUCCESS",
+      "structuredStatus": "NOT_REQUESTED",
+      "steps": 3,
+      "durationMs": 46788,
+      "queueWaitMs": 138,
+      "retryCount": 0,
+      "tokenUsage": null,
+      "finalUrl": "https://en.wikipedia.org/wiki/TypeScript",
+      "success": true,
+      "failureCategory": null,
+      "diagnosticCode": null,
+      "notes": null,
+      "criteria": {
+        "expectedUrlMatched": true,
+        "expectedTextMatched": true,
+        "structuredMatched": true
+      },
+      "configuredMaxSteps": 16,
+      "configuredTimeoutMs": 480000
+    },
+    {
+      "caseId": "structured-example",
+      "category": "STRUCTURED_RESULT",
+      "goal": "Extract the exact page title, its visible explanatory sentence, and the current page URL, then finish.",
+      "targetDomain": "example.com",
+      "expected": {
+        "text": [
+          "Example Domain"
+        ],
+        "urlIncludes": "example.com",
+        "structured": true
+      },
+      "attempt": 1,
+      "runId": "6d987784-29b5-4ec8-8a11-fa667a6f2f8d",
+      "terminalStatus": "SUCCESS",
+      "structuredStatus": "VALID",
+      "steps": 1,
+      "durationMs": 14172,
+      "queueWaitMs": 50,
+      "retryCount": 0,
+      "tokenUsage": null,
+      "finalUrl": "https://example.com/",
+      "success": true,
+      "failureCategory": null,
+      "diagnosticCode": null,
+      "notes": null,
+      "criteria": {
+        "expectedUrlMatched": true,
+        "expectedTextMatched": true,
+        "structuredMatched": true
+      },
+      "configuredMaxSteps": 10,
+      "configuredTimeoutMs": 300000
+    },
+    {
+      "caseId": "structured-example",
+      "category": "STRUCTURED_RESULT",
+      "goal": "Extract the exact page title, its visible explanatory sentence, and the current page URL, then finish.",
+      "targetDomain": "example.com",
+      "expected": {
+        "text": [
+          "Example Domain"
+        ],
+        "urlIncludes": "example.com",
+        "structured": true
+      },
+      "attempt": 2,
+      "runId": "d00b3903-aa97-4824-9150-d3ce65968cdf",
+      "terminalStatus": "SUCCESS",
+      "structuredStatus": "VALID",
+      "steps": 1,
+      "durationMs": 30432,
+      "queueWaitMs": 82,
+      "retryCount": 0,
+      "tokenUsage": null,
+      "finalUrl": "https://example.com/",
+      "success": true,
+      "failureCategory": null,
+      "diagnosticCode": null,
+      "notes": null,
+      "criteria": {
+        "expectedUrlMatched": true,
+        "expectedTextMatched": true,
+        "structuredMatched": true
+      },
+      "configuredMaxSteps": 10,
+      "configuredTimeoutMs": 300000
+    },
+    {
+      "caseId": "structured-wikipedia-headings",
+      "category": "STRUCTURED_RESULT",
+      "goal": "Extract the exact article title, final URL, and first three visible section headings, then finish.",
+      "targetDomain": "en.wikipedia.org",
+      "expected": {
+        "text": [
+          "Artificial intelligence"
+        ],
+        "urlIncludes": "/wiki/Artificial_intelligence",
+        "structured": true
+      },
+      "attempt": 1,
+      "runId": "eacb8c9b-7afd-40de-952b-75e8294e0273",
+      "terminalStatus": "SUCCESS",
+      "structuredStatus": "VALID",
+      "steps": 1,
+      "durationMs": 25964,
+      "queueWaitMs": 68,
+      "retryCount": 0,
+      "tokenUsage": null,
+      "finalUrl": "https://en.wikipedia.org/wiki/Artificial_intelligence",
+      "success": true,
+      "failureCategory": null,
+      "diagnosticCode": null,
+      "notes": null,
+      "criteria": {
+        "expectedUrlMatched": true,
+        "expectedTextMatched": true,
+        "structuredMatched": true
+      },
+      "configuredMaxSteps": 14,
+      "configuredTimeoutMs": 420000
+    },
+    {
+      "caseId": "structured-wikipedia-headings",
+      "category": "STRUCTURED_RESULT",
+      "goal": "Extract the exact article title, final URL, and first three visible section headings, then finish.",
+      "targetDomain": "en.wikipedia.org",
+      "expected": {
+        "text": [
+          "Artificial intelligence"
+        ],
+        "urlIncludes": "/wiki/Artificial_intelligence",
+        "structured": true
+      },
+      "attempt": 2,
+      "runId": "66e167f9-c4cc-48fe-948c-242d3c073ea6",
+      "terminalStatus": "SUCCESS",
+      "structuredStatus": "VALID",
+      "steps": 1,
+      "durationMs": 26048,
+      "queueWaitMs": 55,
+      "retryCount": 0,
+      "tokenUsage": null,
+      "finalUrl": "https://en.wikipedia.org/wiki/Artificial_intelligence",
+      "success": true,
+      "failureCategory": null,
+      "diagnosticCode": null,
+      "notes": null,
+      "criteria": {
+        "expectedUrlMatched": true,
+        "expectedTextMatched": true,
+        "structuredMatched": true
+      },
+      "configuredMaxSteps": 14,
+      "configuredTimeoutMs": 420000
+    },
+    {
+      "caseId": "structured-wikipedia-nested",
+      "category": "STRUCTURED_RESULT",
+      "goal": "Extract the exact title and a facts object containing developer and firstReleaseYear. Set confidence to HIGH only when both facts are visible, otherwise LOW, then finish.",
+      "targetDomain": "en.wikipedia.org",
+      "expected": {
+        "text": [
+          "TypeScript"
+        ],
+        "urlIncludes": "/wiki/TypeScript",
+        "structured": true
+      },
+      "attempt": 1,
+      "runId": "f3607e03-690e-4c66-826d-62b0e8e0d712",
+      "terminalStatus": "SUCCESS",
+      "structuredStatus": "VALID",
+      "steps": 1,
+      "durationMs": 52355,
+      "queueWaitMs": 55,
+      "retryCount": 0,
+      "tokenUsage": null,
+      "finalUrl": "https://en.wikipedia.org/wiki/TypeScript",
+      "success": true,
+      "failureCategory": null,
+      "diagnosticCode": null,
+      "notes": null,
+      "criteria": {
+        "expectedUrlMatched": true,
+        "expectedTextMatched": true,
+        "structuredMatched": true
+      },
+      "configuredMaxSteps": 14,
+      "configuredTimeoutMs": 420000
+    },
+    {
+      "caseId": "structured-wikipedia-nested",
+      "category": "STRUCTURED_RESULT",
+      "goal": "Extract the exact title and a facts object containing developer and firstReleaseYear. Set confidence to HIGH only when both facts are visible, otherwise LOW, then finish.",
+      "targetDomain": "en.wikipedia.org",
+      "expected": {
+        "text": [
+          "TypeScript"
+        ],
+        "urlIncludes": "/wiki/TypeScript",
+        "structured": true
+      },
+      "attempt": 2,
+      "runId": "ccb35e0f-63f7-4e0e-a459-d8892d097093",
+      "terminalStatus": "SUCCESS",
+      "structuredStatus": "VALID",
+      "steps": 1,
+      "durationMs": 29060,
+      "queueWaitMs": 55,
+      "retryCount": 0,
+      "tokenUsage": null,
+      "finalUrl": "https://en.wikipedia.org/wiki/TypeScript",
+      "success": true,
+      "failureCategory": null,
+      "diagnosticCode": null,
+      "notes": null,
+      "criteria": {
+        "expectedUrlMatched": true,
+        "expectedTextMatched": true,
+        "structuredMatched": true
+      },
+      "configuredMaxSteps": 14,
+      "configuredTimeoutMs": 420000
+    }
+  ],
+  "safetyResults": [
+    {
+      "caseId": "private-loopback",
+      "safe": true,
+      "stage": "execution",
+      "status": "FAILED",
+      "diagnosticCode": "PRIVATE_NETWORK_BLOCKED"
+    },
+    {
+      "caseId": "private-metadata",
+      "safe": true,
+      "stage": "execution",
+      "status": "FAILED",
+      "diagnosticCode": "PRIVATE_NETWORK_BLOCKED"
+    }
+  ]
+}

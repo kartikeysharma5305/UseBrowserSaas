@@ -1,14 +1,17 @@
 'use client';
 
+import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
 
 import { EmptyState } from '@/components/dashboard/empty-state';
 import { ErrorState } from '@/components/dashboard/error-state';
-import { LoadingSkeleton } from '@/components/dashboard/loading-skeleton';
 import { StatsCard } from '@/components/dashboard/stats-card';
 import { StatusBadge } from '@/components/dashboard/status-badge';
-import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
+import type { RunRecord, RunsResponse } from '@/lib/types';
+import { formatDate } from '@/lib/utils/format-date';
+import { formatRunResult } from '@/lib/utils/format-run-result';
+import { OnboardingCard } from '@/components/dashboard/onboarding-card';
 
 type Agent = {
   id: string;
@@ -16,22 +19,9 @@ type Agent = {
   status: string;
 };
 
-type Run = {
-  id: string;
-  status: string;
-  startedAt: string;
-  completedAt?: string | null;
-  result?: string | null;
-  duration?: number | null;
-  agent?: {
-    id?: string;
-    name?: string;
-  } | null;
-};
-
 export default function DashboardOverviewPage() {
   const [agents, setAgents] = useState<Agent[]>([]);
-  const [runs, setRuns] = useState<Run[]>([]);
+  const [runs, setRuns] = useState<RunRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -47,10 +37,10 @@ export default function DashboardOverviewPage() {
           throw new Error('Unable to load dashboard data.');
         }
 
-        const [agentsPayload, runsPayload] = await Promise.all([
-          agentsResponse.json(),
-          runsResponse.json(),
-        ]);
+        const [agentsPayload, runsPayload]: [
+          { data?: Agent[] },
+          Partial<RunsResponse>,
+        ] = await Promise.all([agentsResponse.json(), runsResponse.json()]);
 
         setAgents(Array.isArray(agentsPayload?.data) ? agentsPayload.data : []);
         setRuns(Array.isArray(runsPayload?.data) ? runsPayload.data : []);
@@ -90,7 +80,24 @@ export default function DashboardOverviewPage() {
   }, [agents, runs]);
 
   if (loading) {
-    return <LoadingSkeleton lines={5} />;
+    return (
+      <div className="space-y-6">
+        <div className="space-y-2">
+          <div className="h-4 w-32 animate-pulse rounded bg-slate-100 dark:bg-slate-800" />
+          <div className="h-8 w-64 animate-pulse rounded-lg bg-slate-100 dark:bg-slate-800" />
+        </div>
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <Card key={i} className="p-5">
+              <div className="animate-pulse space-y-3">
+                <div className="h-3 w-20 rounded bg-slate-100 dark:bg-slate-800" />
+                <div className="h-8 w-16 rounded-lg bg-slate-50 dark:bg-slate-700" />
+              </div>
+            </Card>
+          ))}
+        </div>
+      </div>
+    );
   }
 
   if (error) {
@@ -100,11 +107,15 @@ export default function DashboardOverviewPage() {
   return (
     <div className="space-y-6">
       <div>
-        <p className="text-sm font-medium text-slate-500">Welcome back</p>
-        <h1 className="text-3xl font-semibold text-slate-900">
+        <p className="text-sm font-medium text-slate-500 dark:text-slate-400">
+          Welcome back
+        </p>
+        <h1 className="text-3xl font-semibold text-slate-900 dark:text-white">
           Your Automation Overview
         </h1>
       </div>
+
+      <OnboardingCard />
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <StatsCard label="Total Agents" value={String(stats.totalAgents)} />
@@ -117,17 +128,22 @@ export default function DashboardOverviewPage() {
         />
       </div>
 
-      <Card className="p-5">
+      <Card className="p-6">
         <div className="mb-4 flex items-center justify-between gap-3">
           <div>
-            <h2 className="text-lg font-semibold text-slate-900">
+            <h2 className="text-lg font-semibold text-slate-900 dark:text-white">
               Recent activity
             </h2>
-            <p className="text-sm text-slate-500">
+            <p className="text-sm text-slate-500 dark:text-slate-400">
               Latest execution activity from your agents.
             </p>
           </div>
-          <Button variant="secondary">View all runs</Button>
+          <Link
+            href="/dashboard/runs"
+            className="inline-flex items-center rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+          >
+            View all runs
+          </Link>
         </div>
 
         {runs.length === 0 ? (
@@ -138,25 +154,26 @@ export default function DashboardOverviewPage() {
         ) : (
           <div className="space-y-3">
             {runs.slice(0, 6).map((run) => (
-              <div
+              <Link
                 key={run.id}
-                className="flex flex-col gap-2 rounded-xl border border-slate-200 px-4 py-3 md:flex-row md:items-center md:justify-between"
+                href={`/dashboard/runs/${run.id}`}
+                className="flex flex-col gap-2 rounded-xl border border-slate-200 px-4 py-3 md:flex-row md:items-center md:justify-between dark:border-slate-800"
               >
                 <div>
-                  <p className="font-medium text-slate-900">
+                  <p className="font-medium text-slate-900 dark:text-slate-100">
                     {run.agent?.name ?? 'Unknown agent'}
                   </p>
-                  <p className="text-sm text-slate-500">
-                    {new Date(run.startedAt).toLocaleString()}
+                  <p className="text-sm text-slate-500 dark:text-slate-400">
+                    {formatDate(run.startedAt)}
                   </p>
                 </div>
                 <div className="flex items-center gap-3">
                   <StatusBadge status={run.status} />
-                  <span className="text-sm text-slate-600">
-                    {run.result ?? 'Run completed'}
+                  <span className="text-sm text-slate-600 dark:text-slate-400">
+                    {formatRunResult(run.result)}
                   </span>
                 </div>
-              </div>
+              </Link>
             ))}
           </div>
         )}

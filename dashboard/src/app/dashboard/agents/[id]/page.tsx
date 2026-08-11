@@ -9,3 +9,6 @@ export default async function AgentDetailPage({
 
   return <AgentDetailClient id={id} />;
 }
+
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';

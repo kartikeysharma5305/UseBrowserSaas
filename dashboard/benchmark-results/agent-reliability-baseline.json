@@ -1,0 +1,168 @@
+{
+  "benchmarkVersion": 1,
+  "generatedAt": "2026-08-11T05:56:20.284Z",
+  "environment": "local",
+  "model": "groq_llama-3.3-70b-versatile",
+  "configuration": {
+    "repeats": 1,
+    "maximumRuns": 4,
+    "actualRuns": 4
+  },
+  "summary": {
+    "total": 4,
+    "successful": 0,
+    "failed": 4,
+    "successRate": 0,
+    "structuredTotal": 1,
+    "structuredValidOrPartial": 0,
+    "safetyPassed": 0,
+    "safetyTotal": 2
+  },
+  "results": [
+    {
+      "caseId": "direct-example-title",
+      "category": "DIRECT_EXTRACTION",
+      "goal": "Open the public page, report its exact page title and the destination of the More information link, then finish.",
+      "targetDomain": "example.com",
+      "expected": {
+        "text": [
+          "Example Domain",
+          "iana.org"
+        ],
+        "urlIncludes": "example.com",
+        "structured": false
+      },
+      "attempt": 1,
+      "runId": "1bcbc291-2cca-4bb9-909d-880a6f23dce5",
+      "terminalStatus": "FAILED",
+      "structuredStatus": "NOT_REQUESTED",
+      "steps": 1,
+      "durationMs": 194349,
+      "queueWaitMs": 3773,
+      "retryCount": 0,
+      "finalUrl": null,
+      "success": false,
+      "failureCategory": "UNKNOWN",
+      "diagnosticCode": "EXECUTION_FAILED",
+      "criteria": {
+        "expectedUrlMatched": false,
+        "expectedTextMatched": false,
+        "structuredMatched": true
+      },
+      "configuredMaxSteps": 10,
+      "configuredTimeoutMs": 300000
+    },
+    {
+      "caseId": "direct-wikipedia-ai",
+      "category": "DIRECT_EXTRACTION",
+      "goal": "Report the exact article title, a two-sentence introduction summary, and the first three visible section headings, then finish.",
+      "targetDomain": "en.wikipedia.org",
+      "expected": {
+        "text": [
+          "Artificial intelligence"
+        ],
+        "urlIncludes": "/wiki/Artificial_intelligence",
+        "structured": false
+      },
+      "attempt": 1,
+      "runId": "171dddd0-fa0e-4758-ab64-5c93dd17c187",
+      "terminalStatus": "FAILED",
+      "structuredStatus": "NOT_REQUESTED",
+      "steps": 0,
+      "durationMs": 19018,
+      "queueWaitMs": 135,
+      "retryCount": 0,
+      "finalUrl": null,
+      "success": false,
+      "failureCategory": "UNKNOWN",
+      "diagnosticCode": "EXECUTION_FAILED",
+      "criteria": {
+        "expectedUrlMatched": false,
+        "expectedTextMatched": false,
+        "structuredMatched": true
+      },
+      "configuredMaxSteps": 14,
+      "configuredTimeoutMs": 420000
+    },
+    {
+      "caseId": "search-wikipedia-ai",
+      "category": "SEARCH_NAVIGATION",
+      "goal": "Use the visible search interface to search for the exact named entity \"Artificial intelligence\". Open the exact-title article, report its title and final URL, then finish. Prefer an exact title match over associated people or topics.",
+      "targetDomain": "en.wikipedia.org",
+      "expected": {
+        "text": [
+          "Artificial intelligence"
+        ],
+        "urlIncludes": "/wiki/Artificial_intelligence",
+        "structured": false
+      },
+      "attempt": 1,
+      "runId": "734316a6-4420-499d-ac4e-fee4a208981d",
+      "terminalStatus": "FAILED",
+      "structuredStatus": "NOT_REQUESTED",
+      "steps": 0,
+      "durationMs": 6140,
+      "queueWaitMs": 41,
+      "retryCount": 0,
+      "finalUrl": null,
+      "success": false,
+      "failureCategory": "UNKNOWN",
+      "diagnosticCode": "EXECUTION_FAILED",
+      "criteria": {
+        "expectedUrlMatched": false,
+        "expectedTextMatched": false,
+        "structuredMatched": true
+      },
+      "configuredMaxSteps": 16,
+      "configuredTimeoutMs": 480000
+    },
+    {
+      "caseId": "structured-example",
+      "category": "STRUCTURED_RESULT",
+      "goal": "Extract the exact page title, its visible explanatory sentence, and the current page URL, then finish.",
+      "targetDomain": "example.com",
+      "expected": {
+        "text": [
+          "Example Domain"
+        ],
+        "urlIncludes": "example.com",
+        "structured": true
+      },
+      "attempt": 1,
+      "runId": "766d04c0-ba0b-45c2-9c90-ac8e8e1d3d32",
+      "terminalStatus": "FAILED",
+      "structuredStatus": "PARSE_FAILED",
+      "steps": 0,
+      "durationMs": 2506,
+      "queueWaitMs": 45,
+      "retryCount": 0,
+      "finalUrl": null,
+      "success": false,
+      "failureCategory": "UNKNOWN",
+      "diagnosticCode": "EXECUTION_FAILED",
+      "criteria": {
+        "expectedUrlMatched": false,
+        "expectedTextMatched": false,
+        "structuredMatched": false
+      },
+      "configuredMaxSteps": 10,
+      "configuredTimeoutMs": 300000
+    }
+  ],
+  "safetyResults": [
+    {
+      "caseId": "private-loopback",
+      "safe": false,
+      "stage": "admission",
+      "status": 202,
+      "diagnosticCode": null
+    },
+    {
+      "caseId": "private-metadata",
+      "safe": false,
+      "stage": "admission",
+      "status": 202,
+      "diagnosticCode": null
+    }
+  ]
+}

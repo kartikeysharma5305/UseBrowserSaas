@@ -3,6 +3,11 @@
   "compilerOptions": {
     "rootDir": ".",
     "types": ["node", "vitest/globals"],
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["dashboard/src/*"],
+      "next/server": ["dashboard/node_modules/next/server.d.ts"]
+    },
     "noEmit": true
   },
   "include": ["test/**/*.ts", "src/**/*.d.ts"]

@@ -9,6 +9,8 @@ import { ChatGoogle } from './google/chat.js';
 import { ChatGroq } from './groq/chat.js';
 import { ChatLiteLLM } from './litellm/chat.js';
 import { ChatMistral } from './mistral/chat.js';
+import { ChatNvidia } from './nvidia/chat.js';
+import { resolveNvidiaNimModel } from './nvidia/models.js';
 import { ChatOCIRaw } from './oci-raw/chat.js';
 import { ChatOllama } from './ollama/chat.js';
 import { ChatOpenAI } from './openai/chat.js';
@@ -21,6 +23,7 @@ type ResolvedProvider =
   | 'google'
   | 'deepseek'
   | 'groq'
+  | 'nvidia'
   | 'openrouter'
   | 'azure'
   | 'ollama'
@@ -38,6 +41,7 @@ const AVAILABLE_PROVIDERS = [
   'google',
   'deepseek',
   'groq',
+  'nvidia',
   'openrouter',
   'azure',
   'ollama',
@@ -281,6 +285,16 @@ const buildProviderModel = (
         model,
         apiKey: process.env.GROQ_API_KEY,
       });
+    case 'nvidia': {
+      const providerModel = resolveNvidiaNimModel(model);
+      if (!providerModel) {
+        throw new Error('The requested NVIDIA NIM model is not approved.');
+      }
+      return new ChatNvidia({
+        model: providerModel,
+        apiKey: process.env.NVIDIA_API_KEY,
+      });
+    }
     case 'openrouter':
       return new ChatOpenRouter({
         model,

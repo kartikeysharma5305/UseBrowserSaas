@@ -1,80 +1,77 @@
-import 'server-only';
+import type Stripe from 'stripe';
 
-import { prisma } from '../db/prisma';
-import { getStripeClient, classifyStripeError } from './stripe-client';
+import { prisma } from '@/lib/db/prisma';
+import { getStripeClient } from './stripe-client';
 
-/**
- * Get or create a Stripe customer id for the given internal user id.
- * Returns the stripe customer id string.
- *
- * Race-safety strategy:
- * - If User.stripeCustomerId already exists, return it.
- * - Otherwise create a Stripe customer using a deterministic idempotency key per user.
- * - Attempt to persist the new customer id into the User row using updateMany where stripeCustomerId IS NULL.
- * - If another process set the stripeCustomerId concurrently, delete the newly-created Stripe customer to avoid duplicates and return the existing value.
- */
-export async function getOrCreateStripeCustomerForUser(userId: string): Promise<string> {
-  const user = await prisma.user.findUnique({ where: { id: userId } });
-  if (!user) throw new Error('User not found');
-  if (user.stripeCustomerId) return user.stripeCustomerId;
-
-  const stripe = getStripeClient();
-  const idempotencyKey = `create_customer_user_${userId}`;
-
-  let customer;
-  try {
-    customer = await stripe.customers.create(
-      {
-        email: user.email,
-        metadata: { userId },
-      },
-      { idempotencyKey }
-    );
-  } catch (err) {
-    const code = classifyStripeError(err);
-    const e = new Error(`Stripe customer creation failed: ${code}`);
-    // preserve original error on a non-serializable property for logs only
-    // (do not serialize or return secrets)
-    // @ts-ignore
-    e.cause = err;
-    throw e;
-  }
-
-  // Try to claim the user row only if stripeCustomerId is still null
-  const res = await prisma.user.updateMany({
-    where: { id: userId, stripeCustomerId: null },
-    data: { stripeCustomerId: customer.id },
+export async function getStripeCustomerIdForUser(userId: string) {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { stripeCustomerId: true },
   });
 
-  if (res.count === 1) {
-    return customer.id;
+  return user?.stripeCustomerId ?? null;
+}
+
+export async function getOrCreateStripeCustomerForUser(
+  userId: string
+): Promise<string> {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { id: true, email: true, stripeCustomerId: true },
+  });
+
+  if (!user) {
+    throw new Error('Authenticated user not found.');
   }
 
-  // Another process wrote stripeCustomerId concurrently. Read the current value and delete the newly-created customer to avoid duplicates.
-  const refreshed = await prisma.user.findUnique({ where: { id: userId } });
-  if (refreshed?.stripeCustomerId) {
-    try {
-      await stripe.customers.del(customer.id);
-    } catch (deleteErr) {
-      // Log safely: don't print secrets. Rethrow only if deletion is essential.
-      // Swallow deletion errors to avoid masking the successful concurrent claim.
-      // @ts-ignore
-      console.warn('Failed to delete duplicate Stripe customer', deleteErr?.message ?? deleteErr);
+  if (!user.email) {
+    throw new Error('User email is required to create a Stripe customer.');
+  }
+
+  if (user.stripeCustomerId) {
+    return user.stripeCustomerId;
+  }
+
+  const stripe = getStripeClient();
+  const idempotencyKey = `billing-create-stripe-customer-${user.id}`;
+
+  const customer = await stripe.customers.create(
+    {
+      email: user.email,
+      metadata: {
+        internalUserId: user.id,
+      },
+    },
+    {
+      idempotencyKey,
     }
-    return refreshed.stripeCustomerId;
+  );
+
+  if (!customer?.id) {
+    throw new Error('Stripe customer creation did not return an ID.');
   }
 
-  // Unexpected: no stripeCustomerId on user after concurrent attempt. Try to set it deterministically.
   try {
-    await prisma.user.update({ where: { id: userId }, data: { stripeCustomerId: customer.id } });
-    return customer.id;
-  } catch (finalErr) {
-    // If this fails, attempt best-effort cleanup of the created Stripe customer and surface a safe error.
-    try {
-      await stripe.customers.del(customer.id);
-    } catch (_) {
-      // ignore
+    const updated = await prisma.user.update({
+      where: { id: user.id },
+      data: { stripeCustomerId: customer.id },
+      select: { stripeCustomerId: true },
+    });
+
+    if (!updated.stripeCustomerId) {
+      throw new Error('Stripe customer mapping was not persisted.');
     }
-    throw new Error('Failed to persist Stripe customer mapping');
+    return updated.stripeCustomerId;
+  } catch (error) {
+    const refreshed = await prisma.user.findUnique({
+      where: { id: user.id },
+      select: { stripeCustomerId: true },
+    });
+
+    if (refreshed?.stripeCustomerId) {
+      return refreshed.stripeCustomerId;
+    }
+
+    throw error;
   }
 }

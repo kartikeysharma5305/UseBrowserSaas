@@ -1,467 +1,686 @@
-import fs from 'node:fs';
-import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { getArtifactMaxBytesPerRun } from '@/lib/execution/configuration';
+import {
+  ExecutionServiceError,
+  safeSerializeError,
+  type ExecutionErrorCode,
+  type ExecutionStage,
+} from '@/lib/execution/errors';
+import {
+  ExecutionTimeoutError,
+  ExecutionAbortedError,
+  waitForCleanup,
+  withWallClockTimeout,
+} from '@/lib/execution/timeout';
+import type { AgentExecutionResult } from '@/lib/execution/types';
+import { logger } from '@/lib/logger';
+import {
+  normalizeEventUrl,
+  truncateEventText,
+} from '@/lib/observability/event-data';
+import { RunCancellationError } from '@/lib/runs/cancellation-types';
+import type { ExecutionSafetyPolicy } from '@/lib/execution-safety/types';
+import {
+  SAFETY_FAILURE_CODES,
+  SafetyPolicyError,
+} from '@/lib/execution-safety/types';
+import {
+  ExecutionSafetyGuard,
+  installExecutionSafetyGuard,
+} from '@/lib/execution-safety/runtime-guard';
+import { safeEngineDomainPatterns } from '@/lib/execution-safety/domain-policy';
+import { recordProviderRunOutcome } from '@/lib/operations/signals';
 
-import { prisma } from '@/lib/db/prisma';
-import { AgentEventType } from '@prisma/client';
+import {
+  buildScreenshotCandidates,
+  deletePersistedArtifacts,
+  persistScreenshotCandidates,
+  type PersistedArtifact,
+} from './artifact-persistence';
+import { EngineLoader } from './engine-loader';
+import { EventCollector } from './event-collector';
+import { PrismaRunPersistence } from './run-persistence';
 
 export interface BrowserExecutionInput {
+  runId?: string;
+  startedAt?: Date;
   agentId: string;
   userId: string;
   task: string;
+  targetWebsite?: string;
+  safetyPolicy?: ExecutionSafetyPolicy;
   configuration: {
     model: string;
+    provider?: 'groq' | 'nvidia';
+    providerModel?: string;
     maxSteps: number;
     timeoutMs: number;
     browserSettings: {
       headless: boolean;
       viewportWidth: number;
       viewportHeight: number;
+      useVision?: boolean;
     };
+  };
+  finalAttempt?: boolean;
+  signal?: AbortSignal;
+  eventStartSequence?: number;
+  workerId?: string;
+  artifactBudgetBytes?: number;
+  artifactBudgetCount?: number;
+  cleanupTimeoutMs?: number;
+}
+
+interface AgentHistoryLike {
+  urls?: () => unknown;
+  screenshots?: () => unknown;
+  screenshot_paths?: () => unknown;
+  final_result?: () => unknown;
+  is_successful?: () => unknown;
+  errors?: () => unknown;
+  number_of_steps?: () => unknown;
+  usage?: unknown;
+}
+
+interface BrowserSessionLike {
+  close: () => Promise<void>;
+}
+
+interface AgentLike {
+  eventbus: {
+    on: (
+      name: string,
+      handler: (event: unknown) => void
+    ) => void | (() => void);
+  };
+  run: (maxSteps: number) => Promise<unknown>;
+  stop?: () => void;
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string')
+    : [];
+}
+
+function providerTokenUsage(value: unknown) {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return null;
+  }
+  const usage = value as Record<string, unknown>;
+  const inputTokens = usage.total_prompt_tokens;
+  const outputTokens = usage.total_completion_tokens;
+  if (
+    !Number.isSafeInteger(inputTokens) ||
+    !Number.isSafeInteger(outputTokens) ||
+    (inputTokens as number) < 0 ||
+    (outputTokens as number) < 0
+  ) {
+    return null;
+  }
+  return {
+    inputTokens: inputTokens as number,
+    outputTokens: outputTokens as number,
+    totalTokens: (inputTokens as number) + (outputTokens as number),
   };
 }
 
-export interface ExecutionEvent {
-  type: string;
-  message: string;
-  data: Record<string, unknown>;
-  timestamp: Date;
+export function providerFailureCode(value: unknown): ExecutionErrorCode | null {
+  const record =
+    typeof value === 'object' && value !== null
+      ? (value as Record<string, unknown>)
+      : null;
+  const status = Number(record?.statusCode ?? record?.status ?? NaN);
+  const message =
+    value instanceof Error
+      ? value.message
+      : typeof value === 'string'
+        ? value
+        : typeof record?.message === 'string'
+          ? record.message
+          : '';
+  if (
+    status === 429 ||
+    /\b429\b|rate[_ -]?limit|\bquota\b|tokens per (?:day|minute)/i.test(message)
+  )
+    return 'PROVIDER_RATE_LIMITED';
+  if (
+    [401, 403].includes(status) ||
+    /\b(?:401|403)\b|unauthorized|invalid api key|authentication/i.test(message)
+  )
+    return 'PROVIDER_AUTH_FAILED';
+  if (
+    status === 404 ||
+    /\b404\b|model (?:is )?not (?:found|available)|unknown model/i.test(message)
+  )
+    return 'PROVIDER_MODEL_UNAVAILABLE';
+  if (/timeout|timed out|aborterror|etimedout/i.test(message))
+    return 'PROVIDER_TIMEOUT';
+  if (
+    status >= 500 ||
+    /service unavailable|bad gateway|econnreset|econnrefused/i.test(message)
+  )
+    return 'PROVIDER_UNAVAILABLE';
+  if (
+    /malformed|invalid json|json.*(?:parse|syntax)|unusable response/i.test(
+      message
+    )
+  )
+    return 'PROVIDER_BAD_RESPONSE';
+  return null;
 }
 
-export interface ExecutionScreenshot {
-  stepNumber: number | null;
-  path: string | null;
-  base64: string | null;
+function unsuccessfulHistoryCode(
+  history: AgentHistoryLike,
+  maxSteps: number
+): ExecutionErrorCode {
+  const errors = stringArray(history.errors?.());
+  for (const error of errors) {
+    const code = providerFailureCode(error);
+    if (code) return code;
+  }
+
+  const numberOfSteps = history.number_of_steps?.();
+  if (
+    typeof numberOfSteps === 'number' &&
+    Number.isSafeInteger(numberOfSteps) &&
+    numberOfSteps >= maxSteps
+  ) {
+    return 'EXECUTION_STEP_LIMIT_EXCEEDED';
+  }
+
+  return 'EXECUTION_FAILED';
 }
 
-export interface BrowserExecutionResult {
-  runId: string;
-  status: 'completed' | 'failed';
-  startedAt: Date;
-  completedAt: Date | null;
-  durationMs: number | null;
-  result: string | null;
-  errorMessage: string | null;
-  events: ExecutionEvent[];
-  screenshots: ExecutionScreenshot[];
-  visitedUrls: string[];
-  rawOutput: unknown;
-}
-
-function resolveRepoDist(relativePath: string): string {
-  const root = path.resolve(
-    path.dirname(process.argv[1] ?? process.cwd()),
-    '..'
+function executionFailure(
+  error: unknown,
+  stage: ExecutionStage,
+  runId: string
+): ExecutionServiceError {
+  if (error instanceof ExecutionServiceError) return error;
+  if (error instanceof SafetyPolicyError) {
+    return new ExecutionServiceError(error.code, {
+      cause: error,
+      stage: 'agent_run',
+      runId,
+    });
+  }
+  if (error instanceof ExecutionTimeoutError) {
+    return new ExecutionServiceError('EXECUTION_TIMED_OUT', {
+      cause: error,
+      stage: 'timeout',
+      runId,
+    });
+  }
+  if (error instanceof ExecutionAbortedError) {
+    return new ExecutionServiceError('EXECUTION_UNAVAILABLE', {
+      cause: error,
+      stage: 'heartbeat',
+      runId,
+    });
+  }
+  const providerCode = providerFailureCode(error);
+  if (providerCode) {
+    return new ExecutionServiceError(providerCode, {
+      cause: error,
+      stage,
+      runId,
+    });
+  }
+  const unavailableStages: ExecutionStage[] = [
+    'engine_load',
+    'llm_create',
+    'browser_start',
+  ];
+  return new ExecutionServiceError(
+    unavailableStages.includes(stage)
+      ? 'EXECUTION_UNAVAILABLE'
+      : 'EXECUTION_FAILED',
+    { cause: error, stage, runId }
   );
-  return path.join(root, 'dist', relativePath);
-}
-
-async function loadAgentModule() {
-  const modulePath = resolveRepoDist('agent/index.js');
-  return import(modulePath);
-}
-
-async function loadBrowserModule() {
-  const modulePath = resolveRepoDist('browser/index.js');
-  return import(modulePath);
-}
-
-async function loadLlmModelsModule() {
-  const modulePath = resolveRepoDist('llm/models.js');
-  return import(modulePath);
-}
-
-async function loadLlmBaseModule() {
-  const modulePath = resolveRepoDist('llm/base.js');
-  return import(modulePath);
-}
-
-function ensureDir(target: string) {
-  fs.mkdirSync(target, { recursive: true, mode: 0o700 });
-}
-
-function resolveArtifactsDir(): string {
-  const candidate = path.join(process.cwd(), 'browseruse_agent_data');
-  ensureDir(candidate);
-  ensureDir(path.join(candidate, 'screenshots'));
-  return candidate;
-}
-
-function copyScreenshotToArtifacts(
-  artifactsDir: string,
-  runId: string,
-  stepNumber: number | null,
-  sourcePath: string | null
-): { persistedPath: string | null; base64: string | null } {
-  if (!sourcePath || !fs.existsSync(sourcePath)) {
-    return { persistedPath: null, base64: null };
-  }
-
-  const extension = path.extname(sourcePath).toLowerCase();
-  const runDir = path.join(artifactsDir, 'screenshots', runId);
-  ensureDir(runDir);
-
-  const suffix = stepNumber != null ? `_step_${stepNumber}` : '';
-  const filename = `${new Date().toISOString().replace(/:/g, '-')}${suffix}${extension}`;
-  const persistedPath = path.join(runDir, filename);
-
-  try {
-    fs.copyFileSync(sourcePath, persistedPath);
-  } catch {
-    return { persistedPath: null, base64: null };
-  }
-
-  let base64: string | null = null;
-  try {
-    const buffer = fs.readFileSync(persistedPath);
-    base64 = buffer.toString('base64');
-  } catch {
-    base64 = null;
-  }
-
-  return { persistedPath, base64 };
 }
 
 export class BrowserExecutionService {
-  async execute(input: BrowserExecutionInput): Promise<BrowserExecutionResult> {
-    const startedAt = new Date();
-    const runId = randomUUID();
-    const artifactsDir = resolveArtifactsDir();
-    const events: ExecutionEvent[] = [];
-    const screenshots: ExecutionScreenshot[] = [];
-    const visitedUrls: string[] = [];
+  private readonly engineLoader = new EngineLoader();
+  private readonly persistence = new PrismaRunPersistence();
 
-    await prisma.run.create({
-      data: {
-        agentId: input.agentId,
-        status: 'RUNNING',
-        startedAt,
-      },
+  private logFailure(
+    message: string,
+    input: BrowserExecutionInput,
+    failure: ExecutionServiceError
+  ) {
+    logger.error(message, {
+      code: failure.code,
+      agentId: input.agentId,
+      runId: failure.runId,
+      stage: failure.stage,
+      error: safeSerializeError(
+        failure.cause === undefined ? failure : failure.cause
+      ),
     });
+  }
 
-    await prisma.agentEvent.create({
-      data: {
-        runId,
-        type: AgentEventType.RUN_STARTED,
-        message: 'Browser execution started.',
-      },
-    });
-
-    let AgentClass: any;
-    let BrowserProfileClass: any;
-    let BrowserSessionClass: any;
-    let getLlmByName: (modelName: string) => any;
-    let BaseChatModel: any;
+  async execute(input: BrowserExecutionInput): Promise<AgentExecutionResult> {
+    const runId = input.runId ?? randomUUID();
+    const startedAt = input.startedAt ?? new Date();
+    let maxArtifactBytes: number;
+    const maxArtifacts = Math.max(
+      0,
+      input.artifactBudgetCount ?? Number.MAX_SAFE_INTEGER
+    );
 
     try {
-      const [agentModule, browserModule, llmModelsModule, llmBaseModule] =
-        await Promise.all([
-          loadAgentModule(),
-          loadBrowserModule(),
-          loadLlmModelsModule(),
-          loadLlmBaseModule(),
-        ]);
-
-      AgentClass = agentModule.Agent;
-      BrowserProfileClass = browserModule.BrowserProfile;
-      BrowserSessionClass = browserModule.BrowserSession;
-      getLlmByName = llmModelsModule.getLlmByName;
-      BaseChatModel = llmBaseModule.BaseChatModel;
+      maxArtifactBytes = Math.min(
+        getArtifactMaxBytesPerRun(),
+        input.artifactBudgetBytes ?? Number.MAX_SAFE_INTEGER
+      );
     } catch (error) {
-      const message =
-        error instanceof Error ? error.message : 'Unknown model name';
-      await this._failRun(runId, startedAt, message);
-      throw error;
+      throw new ExecutionServiceError('EXECUTION_UNAVAILABLE', {
+        cause: error,
+        stage: 'configuration',
+      });
     }
 
-    let llm: any;
+    const liveArtifacts: PersistedArtifact[] = [];
+    let liveArtifactBytes = 0;
+    const collector = new EventCollector(
+      input.eventStartSequence ?? 3,
+      async (event) => {
+        let eventArtifacts: PersistedArtifact[] = [];
+        if (
+          event.screenshot &&
+          liveArtifactBytes < maxArtifactBytes &&
+          liveArtifacts.length < maxArtifacts
+        ) {
+          eventArtifacts = await persistScreenshotCandidates(
+            runId,
+            [event.screenshot],
+            undefined,
+            maxArtifactBytes - liveArtifactBytes,
+            maxArtifacts - liveArtifacts.length
+          );
+        }
+        try {
+          const inserted = await this.persistence.appendLiveEvent(
+            runId,
+            event,
+            eventArtifacts
+          );
+          if (!inserted) {
+            await deletePersistedArtifacts(eventArtifacts);
+            return;
+          }
+          liveArtifacts.push(...eventArtifacts);
+          liveArtifactBytes += eventArtifacts.reduce(
+            (total, artifact) => total + artifact.size,
+            0
+          );
+        } catch (error) {
+          await deletePersistedArtifacts(eventArtifacts);
+          throw error;
+        }
+      }
+    );
+    let stage: ExecutionStage = 'engine_load';
+    let browserSession: BrowserSessionLike | null = null;
+    let agent: AgentLike | null = null;
+    let history: AgentHistoryLike | null = null;
+    let primaryFailure: ExecutionServiceError | null = null;
+    let cancellation: RunCancellationError | null = null;
+    let closePromise: Promise<void> | null = null;
+
+    const closeBrowserOnce = () => {
+      if (!closePromise) {
+        closePromise = browserSession
+          ? browserSession.close()
+          : Promise.resolve();
+      }
+      return closePromise;
+    };
+
     try {
-      llm = getLlmByName(input.configuration.model);
+      const safetyGuard =
+        input.safetyPolicy && input.targetWebsite
+          ? new ExecutionSafetyGuard(input.safetyPolicy, input.targetWebsite)
+          : null;
+      if (safetyGuard && input.targetWebsite)
+        await safetyGuard.assertNavigation(input.targetWebsite, 'initial');
+      const modules = await this.engineLoader.loadEngineModules();
+      const AgentClass = modules.AgentClass as new (opts: unknown) => AgentLike;
+      const BrowserProfileClass = modules.BrowserProfileClass as new (
+        opts: unknown
+      ) => unknown;
+      const BrowserSessionClass = modules.BrowserSessionClass as new (
+        opts: unknown
+      ) => BrowserSessionLike;
+      const getLlmByName = modules.getLlmByName as (
+        modelName: string
+      ) => unknown;
+
+      stage = 'llm_create';
+      const llm = getLlmByName(input.configuration.model);
+
+      stage = 'browser_start';
+      const engineDomains = input.safetyPolicy
+        ? safeEngineDomainPatterns(input.safetyPolicy)
+        : null;
+      const browserProfile = new BrowserProfileClass({
+        headless: input.configuration.browserSettings.headless,
+        viewport: {
+          width: input.configuration.browserSettings.viewportWidth,
+          height: input.configuration.browserSettings.viewportHeight,
+        },
+        ...(engineDomains
+          ? {
+              allowed_domains: engineDomains.allowed,
+              prohibited_domains: engineDomains.blocked,
+              block_ip_addresses: true,
+              accept_downloads: false,
+              downloads_path: null,
+            }
+          : {}),
+      });
+      browserSession = new BrowserSessionClass({
+        browser_profile: browserProfile,
+      });
+      if (safetyGuard)
+        installExecutionSafetyGuard(
+          browserSession as unknown as Record<string, unknown>,
+          safetyGuard
+        );
+      agent = new AgentClass({
+        task: input.task,
+        llm,
+        browser_session: browserSession,
+        source: 'dashboard',
+        use_vision: input.configuration.browserSettings.useVision ?? true,
+        register_signal_handlers: false,
+      });
+      collector.attach(agent);
+
+      stage = 'agent_run';
+      history = (await withWallClockTimeout(
+        () => agent!.run(input.configuration.maxSteps),
+        input.configuration.timeoutMs,
+        () => {
+          try {
+            agent?.stop?.();
+          } catch (error) {
+            logger.warn('Cooperative agent stop failed', {
+              agentId: input.agentId,
+              runId,
+              stage: 'timeout',
+              error: safeSerializeError(error),
+            });
+          }
+          void closeBrowserOnce().catch(() => undefined);
+        },
+        input.signal
+      )) as AgentHistoryLike;
     } catch (error) {
-      const message =
-        error instanceof Error ? error.message : 'Unknown model name';
-      await this._failRun(runId, startedAt, message);
-      throw error;
-    }
-
-    const browserProfile = new BrowserProfileClass({
-      headless: input.configuration.browserSettings.headless,
-      viewport: {
-        width: input.configuration.browserSettings.viewportWidth,
-        height: input.configuration.browserSettings.viewportHeight,
-      },
-    });
-
-    const browserSession = new BrowserSessionClass({
-      browser_profile: browserProfile,
-    });
-
-    const capturedEvents: Array<{
-      event: unknown;
-      timestamp: Date;
-    }> = [];
-
-    const agent = new AgentClass({
-      task: input.task,
-      llm,
-      browser_profile: browserProfile,
-      source: 'dashboard',
-    });
-
-    agent.eventbus.on('CreateAgentStepEvent', (event: unknown) => {
-      capturedEvents.push({ event, timestamp: new Date() });
-    });
-
-    agent.eventbus.on('CreateAgentTaskEvent', (event: unknown) => {
-      capturedEvents.push({ event, timestamp: new Date() });
-    });
-
-    agent.eventbus.on('UpdateAgentTaskEvent', (event: unknown) => {
-      capturedEvents.push({ event, timestamp: new Date() });
-    });
-
-    let history: Awaited<ReturnType<typeof AgentClass.prototype.run>> | null =
-      null;
-    let runError: string | null = null;
-
-    try {
-      history = await agent.run(input.configuration.maxSteps);
-    } catch (error) {
-      runError = error instanceof Error ? error.message : String(error);
-      await this._failRun(runId, startedAt, runError);
+      if (error instanceof RunCancellationError) {
+        cancellation = error;
+      } else {
+        primaryFailure = executionFailure(error, stage, runId);
+        this.logFailure(
+          'Agent execution did not complete',
+          input,
+          primaryFailure
+        );
+      }
     } finally {
+      collector.detach();
       try {
-        await browserSession.close();
-      } catch {
-        // Best-effort cleanup
+        await collector.flush();
+      } catch (error) {
+        if (!primaryFailure && !cancellation) {
+          primaryFailure = new ExecutionServiceError('EXECUTION_FAILED', {
+            cause: error,
+            stage: 'run_persistence',
+            runId,
+          });
+        }
+      }
+      let cleanupError: unknown;
+      const cleanup = closeBrowserOnce().catch((error) => {
+        cleanupError = error;
+      });
+      const cleanedWithinGrace = await waitForCleanup(
+        cleanup,
+        input.cleanupTimeoutMs
+      );
+      if (!cleanedWithinGrace) {
+        logger.warn('Browser cleanup exceeded its grace period', {
+          agentId: input.agentId,
+          runId,
+          stage: 'cleanup',
+        });
+      }
+      if (cleanupError) {
+        logger.warn('Browser cleanup failed', {
+          agentId: input.agentId,
+          runId,
+          stage: 'cleanup',
+          error: safeSerializeError(cleanupError),
+        });
       }
     }
 
     const completedAt = new Date();
-    const durationMs = completedAt.getTime() - startedAt.getTime();
+    const durationMs = Math.max(0, completedAt.getTime() - startedAt.getTime());
+    const collectedEvents = collector.drain();
+    const visitedUrls = stringArray(history?.urls?.())
+      .map(normalizeEventUrl)
+      .filter((url): url is string => Boolean(url))
+      .slice(0, 200);
+    const historyScreenshots = stringArray(history?.screenshots?.()).slice(
+      0,
+      200
+    );
+    const historyScreenshotPaths = stringArray(
+      history?.screenshot_paths?.()
+    ).slice(0, 200);
+    let pendingArtifacts: PersistedArtifact[] = [];
 
-    if (history) {
-      visitedUrls.push(...(history.urls().filter(Boolean) as string[]));
-    }
-
-    for (const captured of capturedEvents) {
-      const rawEvent = captured.event as Record<string, unknown>;
-
-      if (
-        rawEvent.event_type === 'CreateAgentStepEvent' ||
-        rawEvent.constructor?.name === 'CreateAgentStepEvent'
-      ) {
-        const stepEvent = rawEvent as {
-          step?: number;
-          evaluation_previous_goal?: string;
-          memory?: string;
-          next_goal?: string;
-          actions?: unknown[];
-          screenshot_url?: string | null;
-          url?: string;
-        };
-
-        const stepNumber =
-          typeof stepEvent.step === 'number' ? stepEvent.step : null;
-
-        let persistedScreenshot: {
-          persistedPath: string | null;
-          base64: string | null;
-        } = { persistedPath: null, base64: null };
-
-        if (typeof stepEvent.screenshot_url === 'string') {
-          const dataUrl = stepEvent.screenshot_url;
-          if (dataUrl.startsWith('data:image')) {
-            const base64Data = dataUrl.split(',')[1];
-            if (base64Data) {
-              const runDir = path.join(artifactsDir, 'screenshots', runId);
-              ensureDir(runDir);
-              const filename =
-                stepNumber != null
-                  ? `step_${stepNumber}.png`
-                  : `step_${Date.now()}.png`;
-              const persistedPath = path.join(runDir, filename);
-              try {
-                fs.writeFileSync(
-                  persistedPath,
-                  Buffer.from(base64Data, 'base64')
-                );
-                persistedScreenshot = {
-                  persistedPath,
-                  base64: base64Data,
-                };
-              } catch {
-                persistedScreenshot = { persistedPath: null, base64: null };
-              }
-            }
-          } else if (dataUrl && fs.existsSync(dataUrl)) {
-            persistedScreenshot = copyScreenshotToArtifacts(
-              artifactsDir,
-              runId,
-              stepNumber,
-              dataUrl
-            );
-          }
-        }
-
-        screenshots.push({
-          stepNumber,
-          path: persistedScreenshot.persistedPath,
-          base64: persistedScreenshot.base64,
-        });
-
-        events.push({
-          type: 'step',
-          message:
-            (typeof stepEvent.evaluation_previous_goal === 'string'
-              ? stepEvent.evaluation_previous_goal
-              : '') || 'Step executed',
-          data: {
-            step: stepEvent.step,
-            memory: stepEvent.memory,
-            next_goal: stepEvent.next_goal,
-            actions: stepEvent.actions,
-            url: stepEvent.url,
-          },
-          timestamp: captured.timestamp,
-        });
-      } else if (
-        rawEvent.event_type === 'CreateAgentTaskEvent' ||
-        rawEvent.constructor?.name === 'CreateAgentTaskEvent'
-      ) {
-        events.push({
-          type: 'task',
-          message: 'Task started',
-          data: {
-            task: (rawEvent as Record<string, unknown>).task,
-            llm_model: (rawEvent as Record<string, unknown>).llm_model,
-          },
-          timestamp: captured.timestamp,
-        });
-      } else if (
-        rawEvent.event_type === 'UpdateAgentTaskEvent' ||
-        rawEvent.constructor?.name === 'UpdateAgentTaskEvent'
-      ) {
-        const updateEvent = rawEvent as {
-          stopped?: boolean;
-          paused?: boolean;
-          done_output?: string | null;
-        };
-        events.push({
-          type: 'update',
-          message: updateEvent.done_output
-            ? `Task finished: ${String(updateEvent.done_output).slice(0, 200)}`
-            : updateEvent.stopped
-              ? 'Task stopped'
-              : 'Task updated',
-          data: {
-            stopped: updateEvent.stopped,
-            paused: updateEvent.paused,
-            done_output: updateEvent.done_output,
-          },
-          timestamp: captured.timestamp,
-        });
-      }
-    }
-
-    const finalResult = history ? history.final_result() : null;
-    const isSuccessful = history ? history.is_successful() : null;
-    const finalStatus: 'completed' | 'failed' = runError
-      ? 'failed'
-      : isSuccessful === true
-        ? 'completed'
-        : isSuccessful === false
-          ? 'failed'
-          : runError
-            ? 'failed'
-            : 'completed';
-
-    if (finalStatus === 'completed') {
-      await prisma.run.update({
-        where: { id: runId },
-        data: {
-          status: 'SUCCESS',
-          completedAt,
-          duration: durationMs,
-          result: {
-            summary: finalResult,
-            visitedUrls,
-          },
-        },
-      });
-    } else {
-      await this._failRun(
+    try {
+      const liveEventSequences = new Set(
+        liveArtifacts
+          .map((artifact) => artifact.eventSequence)
+          .filter((sequence): sequence is number => sequence !== null)
+      );
+      const remainingCandidates = buildScreenshotCandidates(
+        collectedEvents,
+        historyScreenshots,
+        historyScreenshotPaths
+      ).filter(
+        (candidate) =>
+          candidate.kind !== 'data-url' &&
+          (candidate.eventSequence === null ||
+            !liveEventSequences.has(candidate.eventSequence))
+      );
+      pendingArtifacts = await persistScreenshotCandidates(
         runId,
-        startedAt,
-        runError ?? 'Execution unsuccessful'
+        remainingCandidates,
+        undefined,
+        Math.max(0, maxArtifactBytes - liveArtifactBytes),
+        Math.max(0, maxArtifacts - liveArtifacts.length)
+      );
+    } catch (error) {
+      logger.warn('Run artifact collection failed', {
+        runId,
+        agentId: input.agentId,
+        error: safeSerializeError(error),
+      });
+    }
+
+    const finalResult = history?.final_result?.();
+    const summary = truncateEventText(finalResult, 4000) ?? null;
+    const tokenUsage = providerTokenUsage(history?.usage);
+    if (
+      !primaryFailure &&
+      !cancellation &&
+      history?.is_successful?.() !== true
+    ) {
+      primaryFailure = new ExecutionServiceError(
+        unsuccessfulHistoryCode(history!, input.configuration.maxSteps),
+        {
+          stage: 'agent_result',
+          runId,
+        }
+      );
+      this.logFailure(
+        'Agent reported an unsuccessful result',
+        input,
+        primaryFailure
       );
     }
 
-    for (const capturedEvent of events) {
-      await prisma.agentEvent.create({
-        data: {
-          runId,
-          type:
-            capturedEvent.type === 'step'
-              ? AgentEventType.STEP_COMPLETED
-              : capturedEvent.type === 'task'
-                ? AgentEventType.STEP_STARTED
-                : AgentEventType.RUN_COMPLETED,
-          message: capturedEvent.message,
-          timestamp: capturedEvent.timestamp,
-        },
-      });
+    const provider =
+      input.configuration.provider ??
+      (input.configuration.model.startsWith('nvidia_') ? 'nvidia' : 'groq');
+    if (!cancellation)
+      recordProviderRunOutcome(provider, primaryFailure?.code ?? null);
+
+    if (
+      primaryFailure &&
+      [
+        'EXECUTION_UNAVAILABLE',
+        'PROVIDER_UNAVAILABLE',
+        'PROVIDER_TIMEOUT',
+      ].includes(primaryFailure.code) &&
+      input.finalAttempt === false
+    ) {
+      await deletePersistedArtifacts(pendingArtifacts);
+      throw primaryFailure;
     }
 
-    await prisma.agentEvent.create({
-      data: {
+    const artifacts = [...liveArtifacts, ...pendingArtifacts];
+    try {
+      if (cancellation) {
+        if (!input.workerId) {
+          throw new Error(
+            'Worker identity is required to persist cancellation.'
+          );
+        }
+        await this.persistence.markRunCanceled(
+          runId,
+          input.workerId,
+          startedAt,
+          collectedEvents,
+          artifacts
+        );
+      } else if (primaryFailure?.code === 'EXECUTION_TIMED_OUT') {
+        const finalized = await this.persistence.markRunTimedOut(
+          runId,
+          startedAt,
+          collectedEvents,
+          artifacts
+        );
+        if (!finalized && input.workerId) {
+          await this.persistence.markRunCanceled(
+            runId,
+            input.workerId,
+            startedAt,
+            collectedEvents,
+            artifacts
+          );
+        }
+      } else if (primaryFailure) {
+        const shouldPersistFailureCode =
+          SAFETY_FAILURE_CODES.includes(
+            primaryFailure.code as (typeof SAFETY_FAILURE_CODES)[number]
+          ) ||
+          primaryFailure.code === 'AI_PROVIDER_RATE_LIMITED' ||
+          primaryFailure.code.startsWith('PROVIDER_') ||
+          primaryFailure.code === 'EXECUTION_STEP_LIMIT_EXCEEDED';
+        const finalized = shouldPersistFailureCode
+          ? await this.persistence.markRunFailed(
+              runId,
+              startedAt,
+              primaryFailure.publicMessage,
+              collectedEvents,
+              artifacts,
+              primaryFailure.code
+            )
+          : await this.persistence.markRunFailed(
+              runId,
+              startedAt,
+              primaryFailure.publicMessage,
+              collectedEvents,
+              artifacts
+            );
+        if (!finalized && input.workerId) {
+          await this.persistence.markRunCanceled(
+            runId,
+            input.workerId,
+            startedAt,
+            collectedEvents,
+            artifacts
+          );
+        }
+      } else {
+        const finalized = await this.persistence.finalizeRun({
+          runId,
+          startedAt,
+          status: 'SUCCESS',
+          result: {
+            durationMs,
+            summary,
+            rawResult:
+              typeof finalResult === 'string'
+                ? finalResult
+                : finalResult == null
+                  ? null
+                  : JSON.stringify(finalResult),
+            visitedUrls,
+            tokenUsage,
+          },
+          events: collectedEvents,
+          artifacts,
+        });
+        if (!finalized && input.workerId) {
+          await this.persistence.markRunCanceled(
+            runId,
+            input.workerId,
+            startedAt,
+            collectedEvents,
+            artifacts
+          );
+        }
+      }
+    } catch (error) {
+      await deletePersistedArtifacts(pendingArtifacts);
+      const failure = new ExecutionServiceError('EXECUTION_FAILED', {
+        cause: error,
+        stage: 'run_persistence',
         runId,
-        type:
-          finalStatus === 'completed'
-            ? AgentEventType.RUN_COMPLETED
-            : AgentEventType.RUN_FAILED,
-        message:
-          finalStatus === 'completed'
-            ? `Run completed in ${durationMs} ms.`
-            : `Run failed: ${runError ?? 'Unknown error'}`,
-      },
+      });
+      this.logFailure('Run terminal transaction failed', input, failure);
+      throw failure;
+    }
+
+    if (cancellation) throw cancellation;
+    if (primaryFailure) throw primaryFailure;
+
+    logger.info('Run execution finished', {
+      runId,
+      status: 'completed',
+      durationMs,
+      eventCount: collectedEvents.length + 2,
+      artifactCount: artifacts.length,
     });
 
     return {
       runId,
-      status: finalStatus,
+      status: 'completed',
       startedAt,
       completedAt,
       durationMs,
-      result: finalResult,
-      errorMessage: runError,
-      events,
-      screenshots,
+      summary,
       visitedUrls,
-      rawOutput: history?.toJSON?.(null) ?? null,
+      eventCount: collectedEvents.length + 2,
+      artifactCount: artifacts.length,
+      detailsUrl: `/dashboard/runs/${runId}`,
     };
   }
-
-  private async _failRun(runId: string, startedAt: Date, errorMessage: string) {
-    const completedAt = new Date();
-    const durationMs = completedAt.getTime() - startedAt.getTime();
-
-    await prisma.run.update({
-      where: { id: runId },
-      data: {
-        status: 'FAILED',
-        completedAt,
-        duration: durationMs,
-        errorMessage,
-      },
-    });
-
-    await prisma.agentEvent.create({
-      data: {
-        runId,
-        type: AgentEventType.RUN_FAILED,
-        message: errorMessage,
-      },
-    });
-  }
 }
+import { randomUUID } from 'node:crypto';

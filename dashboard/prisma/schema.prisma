@@ -20,12 +20,48 @@ enum ScheduleType {
   WEEKLY
 }
 
+enum AgentVariableType {
+  TEXT
+  URL
+  NUMBER
+  BOOLEAN
+  SECRET
+}
+
 enum RunStatus {
   QUEUED
   RUNNING
   SUCCESS
   FAILED
+  TIMED_OUT
   CANCELED
+}
+
+enum RunSource {
+  MANUAL
+  SCHEDULED
+  API
+}
+
+enum StructuredResultStatus {
+  NOT_REQUESTED
+  PENDING
+  VALID
+  PARTIAL
+  INVALID
+  PARSE_FAILED
+  TOO_LARGE
+}
+
+enum ApiKeyStatus {
+  ACTIVE
+  REVOKED
+}
+
+enum ApiIdempotencyStatus {
+  PROCESSING
+  COMPLETED
+  FAILED
 }
 
 enum AgentEventType {
@@ -36,20 +72,356 @@ enum AgentEventType {
   STEP_FAILED
   RUN_COMPLETED
   RUN_FAILED
+  RUN_CANCELED
   SYSTEM
 }
 
+enum RunArtifactType {
+  SCREENSHOT
+}
+
+enum ArtifactStorageProvider {
+  LOCAL
+  S3
+}
+
+enum PlanCode {
+  FREE
+  PRO
+  INTERNAL
+}
+
+enum PlanSource {
+  DEFAULT
+  STRIPE
+  MANUAL
+  INTERNAL
+}
+
+enum BetaAccessStatus {
+  NONE
+  ACTIVE
+  SUSPENDED
+  ENDED
+}
+
+enum BetaInviteStatus {
+  PENDING
+  ACCEPTING
+  ACCEPTED
+  REVOKED
+}
+
+enum BetaFeedbackCategory {
+  BUG
+  USABILITY
+  FEATURE_REQUEST
+  RUN_FAILURE
+  PERFORMANCE
+  BILLING
+  OTHER
+}
+
+enum BetaFeedbackStatus {
+  NEW
+  REVIEWING
+  RESOLVED
+  WONT_FIX
+}
+
+enum BillingProvider {
+  STRIPE
+}
+
+enum SubscriptionStatus {
+  INCOMPLETE
+  INCOMPLETE_EXPIRED
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELED
+  UNPAID
+  PAUSED
+}
+
+enum BillingWebhookProcessingState {
+  PROCESSING
+  PROCESSED
+  FAILED
+}
+
+enum AccountDeletionStatus {
+  PENDING
+  COMPLETED
+  FAILED
+}
+
+enum AccountDeletionStage {
+  REQUESTED
+  CANCELING_RUNS
+  DELETING_ARTIFACTS
+  CANCELING_SUBSCRIPTION
+  DELETING_PRODUCT_DATA
+  INVALIDATING_SESSIONS
+  COMPLETED
+}
+
+enum ScheduleKind {
+  ONCE
+  DAILY
+  WEEKLY
+}
+
+enum ScheduleState {
+  ENABLED
+  PAUSED
+  COMPLETED
+}
+
+enum ScheduledOccurrenceStatus {
+  DISCOVERED
+  ADMITTED
+  SKIPPED
+  QUOTA_BLOCKED
+  ACTIVE_LIMIT_BLOCKED
+  PLAN_BLOCKED
+  ACCOUNT_BLOCKED
+  AGENT_BLOCKED
+  MISSED
+  CANCELED
+  FAILED
+}
+
+enum NotificationType {
+  RUN_SUCCEEDED
+  RUN_FAILED
+  RUN_TIMED_OUT
+  RUN_CANCELED
+  SCHEDULE_QUOTA_BLOCKED
+  SCHEDULE_REPEATED_FAILURE
+  USAGE_THRESHOLD
+  STORAGE_THRESHOLD
+  BILLING_PAYMENT_ISSUE
+  SUBSCRIPTION_CANCELING
+  SUBSCRIPTION_ENDED
+  ACCOUNT_DELETION_COMPLETED
+  ACCOUNT_DELETION_BLOCKED
+}
+
+enum NotificationChannel {
+  EMAIL
+}
+
+enum NotificationDeliveryStatus {
+  PENDING
+  PROCESSING
+  SENT
+  FAILED
+  SUPPRESSED
+}
+
+enum WebhookEndpointStatus {
+  ENABLED
+  DISABLED
+}
+
+enum WebhookDeliveryStatus {
+  PENDING
+  PROCESSING
+  DELIVERED
+  FAILED
+  SUPPRESSED
+}
+
+enum UsageType {
+  RUN_ADMITTED
+  RUN_SUCCEEDED
+  RUN_FAILED
+  RUN_TIMED_OUT
+  RUN_CANCELED
+  ATTEMPT_STARTED
+  EXECUTION_MILLISECOND
+  BROWSER_STEP
+  ARTIFACT_BYTE
+  LLM_INPUT_TOKEN
+  LLM_OUTPUT_TOKEN
+  LLM_TOTAL_TOKEN
+}
+
+enum UsageUnit {
+  COUNT
+  MILLISECOND
+  BYTE
+}
+
+enum UsageMeasurement {
+  EXACT
+  DERIVED
+  PROVIDER_REPORTED
+}
+
+enum WorkerInstanceStatus {
+  STARTING
+  ACTIVE
+  DRAINING
+  STOPPED
+  LOST
+}
+
+enum LegalDocumentType {
+  TERMS
+  PRIVACY
+  ACCEPTABLE_USE
+}
+
 model User {
-  id            String    @id @default(cuid())
-  email         String    @unique
-  name          String?
-  emailVerified Boolean   @default(false)
-  image         String?
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
-  accounts      Account[]
-  sessions      Session[]
-  agents        Agent[]
+  id                     String                    @id @default(cuid())
+  email                  String                    @unique
+  name                   String?
+  emailVerified          Boolean                   @default(false)
+  image                  String?
+  planCode               PlanCode                  @default(FREE)
+  planAssignedAt         DateTime?
+  planSource             PlanSource                @default(DEFAULT)
+  betaAccessStatus       BetaAccessStatus          @default(NONE)
+  betaActivatedAt        DateTime?
+  betaEndedAt            DateTime?
+  stripeCustomerId       String?                   @unique
+  createdAt              DateTime                  @default(now())
+  updatedAt              DateTime                  @updatedAt
+  accounts               Account[]
+  sessions               Session[]
+  agents                 Agent[]
+  usageRecords           UsageRecord[]
+  subscription           Subscription?
+  accountDeletion        AccountDeletion?
+  schedules              Schedule[]
+  notifications          Notification[]
+  notificationPreference NotificationPreference?
+  onboardingState        OnboardingState?
+  apiKeys                ApiKey[]
+  apiAuditEvents         ApiAuditEvent[]
+  apiIdempotencyRequests ApiIdempotencyRequest[]
+  webhookEndpoints       WebhookEndpoint[]
+  webhookEvents          WebhookEvent[]
+  legalAcceptances       LegalDocumentAcceptance[]
+  betaInvitesCreated     BetaInvite[]              @relation("BetaInviteCreator")
+  acceptedBetaInvite     BetaInvite?               @relation("BetaInviteAcceptedUser")
+  betaFeedback           BetaFeedback[]
+
+  @@index([betaAccessStatus])
+}
+
+model BetaInvite {
+  id               String           @id @default(cuid())
+  email            String
+  tokenHash        String           @unique
+  tokenPrefix      String
+  status           BetaInviteStatus @default(PENDING)
+  expiresAt        DateTime
+  note             String?
+  planCode         PlanCode         @default(FREE)
+  invitedByUserId  String?
+  acceptedByUserId String?          @unique
+  claimStartedAt   DateTime?
+  acceptedAt       DateTime?
+  revokedAt        DateTime?
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+  invitedBy        User?            @relation("BetaInviteCreator", fields: [invitedByUserId], references: [id], onDelete: SetNull)
+  acceptedBy       User?            @relation("BetaInviteAcceptedUser", fields: [acceptedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([email, status])
+  @@index([status, expiresAt])
+  @@index([invitedByUserId, createdAt])
+}
+
+model BetaFeedback {
+  id             String               @id @default(cuid())
+  userId         String
+  runId          String?
+  category       BetaFeedbackCategory
+  message        String
+  contextPath    String?
+  status         BetaFeedbackStatus   @default(NEW)
+  releaseVersion String
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @updatedAt
+  user           User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  run            Run?                 @relation(fields: [runId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
+  @@index([runId])
+}
+
+model LegalDocumentAcceptance {
+  id              String            @id @default(cuid())
+  userId          String
+  documentType    LegalDocumentType
+  documentVersion String
+  acceptedAt      DateTime          @default(now())
+  user            User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, documentType, documentVersion])
+  @@index([userId, acceptedAt])
+  @@index([documentType, documentVersion])
+}
+
+model ApiKey {
+  id                  String                  @id @default(cuid())
+  userId              String
+  name                String
+  keyPrefix           String                  @unique
+  keyHash             String
+  scopes              String[]
+  status              ApiKeyStatus            @default(ACTIVE)
+  expiresAt           DateTime?
+  createdAt           DateTime                @default(now())
+  lastUsedAt          DateTime?
+  revokedAt           DateTime?
+  version             Int                     @default(1)
+  user                User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  idempotencyRequests ApiIdempotencyRequest[]
+  auditEvents         ApiAuditEvent[]
+
+  @@index([userId, status])
+  @@index([expiresAt])
+}
+
+model ApiIdempotencyRequest {
+  id                 String               @id @default(cuid())
+  apiKeyId           String
+  userId             String
+  operation          String
+  idempotencyKeyHash String
+  requestFingerprint String
+  status             ApiIdempotencyStatus @default(PROCESSING)
+  runId              String?
+  errorCode          String?
+  createdAt          DateTime             @default(now())
+  expiresAt          DateTime
+  apiKey             ApiKey               @relation(fields: [apiKeyId], references: [id], onDelete: Cascade)
+  user               User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([apiKeyId, operation, idempotencyKeyHash])
+  @@index([expiresAt])
+  @@index([userId, createdAt])
+}
+
+model ApiAuditEvent {
+  id        String   @id @default(cuid())
+  userId    String
+  apiKeyId  String?
+  action    String
+  targetId  String?
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  apiKey    ApiKey?  @relation(fields: [apiKeyId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([apiKeyId, createdAt])
+  @@index([action, createdAt])
 }
 
 model Session {
@@ -98,55 +470,448 @@ model Verification {
 }
 
 model Agent {
-  id             String       @id @default(cuid())
-  userId         String
-  name           String
-  description    String?
-  goal           String
-  targetWebsite  String
-  status         AgentStatus  @default(PAUSED)
-  scheduleType   ScheduleType @default(MANUAL)
-  scheduleConfig Json?
-  configuration  Json
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
-  lastRunAt      DateTime?
-  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  runs           Run[]
+  id              String          @id @default(cuid())
+  userId          String
+  name            String
+  description     String?
+  goal            String
+  targetWebsite   String
+  status          AgentStatus     @default(PAUSED)
+  scheduleType    ScheduleType    @default(MANUAL)
+  scheduleConfig  Json?
+  configuration   Json
+  safetyPolicy    Json?
+  outputSchema    Json?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+  lastRunAt       DateTime?
+  variableVersion Int             @default(1)
+  user            User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  runs            Run[]
+  schedules       Schedule[]
+  variables       AgentVariable[]
 
   @@index([userId])
   @@index([userId, status])
   @@index([createdAt])
 }
 
-model Run {
-  id           String       @id @default(cuid())
+model AgentVariable {
+  id           String            @id @default(cuid())
   agentId      String
-  status       RunStatus    @default(QUEUED)
-  startedAt    DateTime     @default(now())
-  completedAt  DateTime?
-  duration     Int?
-  result       Json?
-  errorMessage String?
-  createdAt    DateTime     @default(now())
-  agent        Agent        @relation(fields: [agentId], references: [id], onDelete: Cascade)
-  events       AgentEvent[]
+  key          String
+  label        String
+  description  String?
+  type         AgentVariableType
+  required     Boolean           @default(false)
+  defaultValue String?
+  constraints  Json?
+  displayOrder Int               @default(0)
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+  agent        Agent             @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@unique([agentId, key])
+  @@index([agentId, displayOrder])
+}
+
+model OnboardingState {
+  id                 String    @id @default(cuid())
+  userId             String    @unique
+  visible            Boolean   @default(true)
+  dismissedAt        DateTime?
+  reopenedAt         DateTime?
+  completedAt        DateTime?
+  selectedTemplateId String?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  user               User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([visible, updatedAt])
+}
+
+model Run {
+  id                     String                 @id @default(cuid())
+  agentId                String
+  status                 RunStatus              @default(QUEUED)
+  source                 RunSource              @default(MANUAL)
+  startedAt              DateTime               @default(now())
+  completedAt            DateTime?
+  duration               Int?
+  result                 Json?
+  errorMessage           String?
+  queueJobId             String?                @unique
+  queuedAt               DateTime?
+  workerId               String?
+  leaseExpiresAt         DateTime?
+  heartbeatAt            DateTime?
+  attempt                Int                    @default(0)
+  lastFailureCode        String?
+  cancelRequestedAt      DateTime?
+  canceledAt             DateTime?
+  canceledByUserId       String?
+  cancelReason           String?
+  inputSnapshot          Json?
+  executionTask          String?
+  executionTargetWebsite String?
+  executionConfiguration Json?
+  costBudget             Json?
+  executionSafetyPolicy  Json?
+  outputSchemaSnapshot   Json?
+  outputSchemaVersion    Int?
+  structuredRawResult    String?
+  structuredCandidate    Json?
+  structuredResult       Json?
+  structuredStatus       StructuredResultStatus @default(NOT_REQUESTED)
+  structuredErrors       Json?
+  structuredValidatedAt  DateTime?
+  createdAt              DateTime               @default(now())
+  agent                  Agent                  @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  events                 AgentEvent[]
+  artifacts              RunArtifact[]
+  usageRecords           UsageRecord[]
+  scheduledOccurrence    ScheduledOccurrence?
+  notifications          Notification[]
+  webhookEvents          WebhookEvent[]
+  betaFeedback           BetaFeedback[]
 
   @@index([agentId])
   @@index([status])
   @@index([startedAt])
   @@index([agentId, startedAt])
+  @@index([status, leaseExpiresAt])
+  @@index([workerId, status])
+  @@index([queuedAt])
+  @@index([status, cancelRequestedAt])
+  @@index([structuredStatus])
 }
 
 model AgentEvent {
   id        String         @id @default(cuid())
   runId     String
+  sequence  Int
   type      AgentEventType
   message   String
+  data      Json?
   timestamp DateTime       @default(now())
   run       Run            @relation(fields: [runId], references: [id], onDelete: Cascade)
 
-  @@index([runId])
+  @@unique([runId, sequence])
+  @@index([runId, sequence])
   @@index([runId, timestamp])
   @@index([type])
+}
+
+model RunArtifact {
+  id              String                  @id @default(cuid())
+  runId           String
+  run             Run                     @relation(fields: [runId], references: [id], onDelete: Cascade)
+  type            RunArtifactType
+  storageProvider ArtifactStorageProvider @default(LOCAL)
+  storageKey      String
+  checksum        String?
+  fileName        String
+  mimeType        String
+  size            Int
+  stepNumber      Int?
+  eventSequence   Int?
+  createdAt       DateTime                @default(now())
+
+  @@unique([runId, storageKey])
+  @@index([runId, createdAt])
+  @@index([runId, stepNumber])
+  @@index([runId, eventSequence])
+  @@index([storageProvider, createdAt])
+}
+
+model UsageRecord {
+  id             String           @id @default(cuid())
+  userId         String
+  runId          String?
+  attempt        Int?
+  type           UsageType
+  quantity       BigInt
+  unit           UsageUnit
+  measurement    UsageMeasurement
+  idempotencyKey String           @unique
+  recordedAt     DateTime         @default(now())
+  periodStart    DateTime
+  periodEnd      DateTime
+  metadata       Json?
+  user           User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  run            Run?             @relation(fields: [runId], references: [id], onDelete: SetNull)
+
+  @@index([userId, periodStart, type])
+  @@index([runId])
+  @@index([recordedAt])
+}
+
+model WorkerInstance {
+  id              String               @id
+  status          WorkerInstanceStatus @default(STARTING)
+  startedAt       DateTime             @default(now())
+  lastHeartbeatAt DateTime             @default(now())
+  stoppedAt       DateTime?
+  concurrency     Int
+  activeCount     Int                  @default(0)
+  buildVersion    String?
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+
+  @@index([status, lastHeartbeatAt])
+  @@index([lastHeartbeatAt])
+}
+
+model Subscription {
+  id                       String             @id @default(cuid())
+  userId                   String             @unique
+  user                     User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider                 BillingProvider    @default(STRIPE)
+  stripeSubscriptionId     String             @unique
+  stripeCustomerId         String
+  stripePriceId            String
+  status                   SubscriptionStatus
+  planCode                 PlanCode
+  currentPeriodStart       DateTime?
+  currentPeriodEnd         DateTime?
+  cancelAtPeriodEnd        Boolean            @default(false)
+  canceledAt               DateTime?
+  trialEndsAt              DateTime?
+  lastStripeEventCreatedAt DateTime?
+  lastStripeEventId        String?
+  paymentFailureAt         DateTime?
+  paymentFailureCode       String?
+  createdAt                DateTime           @default(now())
+  updatedAt                DateTime           @updatedAt
+  notifications            Notification[]
+
+  @@index([stripeCustomerId])
+  @@index([status])
+  @@index([currentPeriodEnd])
+}
+
+model BillingWebhookEvent {
+  id              String                        @id
+  type            String
+  apiVersion      String?
+  stripeCreatedAt DateTime
+  processedAt     DateTime?
+  processingState BillingWebhookProcessingState @default(PROCESSING)
+  errorCode       String?
+  receivedAt      DateTime                      @default(now())
+
+  @@index([processingState])
+  @@index([stripeCreatedAt])
+}
+
+model AccountDeletion {
+  id                   String                @id @default(cuid())
+  userId               String                @unique
+  user                 User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  status               AccountDeletionStatus @default(PENDING)
+  stage                AccountDeletionStage  @default(REQUESTED)
+  attempts             Int                   @default(0)
+  requestedAt          DateTime              @default(now())
+  completedAt          DateTime?
+  canceledSubscription Boolean               @default(false)
+  errorCode            String?
+  lastError            String?
+  updatedAt            DateTime              @updatedAt
+  notifications        Notification[]
+}
+
+model Schedule {
+  id                        String                @id @default(cuid())
+  userId                    String
+  agentId                   String
+  kind                      ScheduleKind
+  timezone                  String
+  localTime                 String?
+  weekdays                  Int[]                 @default([])
+  oneTimeAt                 DateTime?
+  state                     ScheduleState         @default(ENABLED)
+  nextRunAt                 DateTime?
+  lastTriggeredOccurrenceAt DateTime?
+  consecutiveFailures       Int                   @default(0)
+  consecutiveBlocks         Int                   @default(0)
+  variableValues            Json                  @default("{}")
+  variableVersion           Int?
+  configurationErrorCode    String?
+  version                   Int                   @default(1)
+  createdAt                 DateTime              @default(now())
+  updatedAt                 DateTime              @updatedAt
+  user                      User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agent                     Agent                 @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  occurrences               ScheduledOccurrence[]
+  notifications             Notification[]
+  webhookEvents             WebhookEvent[]
+
+  @@index([state, nextRunAt])
+  @@index([userId, state])
+  @@index([agentId, state])
+}
+
+model ScheduledOccurrence {
+  id                   String                    @id @default(cuid())
+  scheduleId           String
+  scheduledFor         DateTime
+  status               ScheduledOccurrenceStatus @default(DISCOVERED)
+  runId                String?                   @unique
+  discoveredAt         DateTime                  @default(now())
+  resolvedAt           DateTime?
+  processingLeaseUntil DateTime?
+  nextAttemptAt        DateTime                  @default(now())
+  attempts             Int                       @default(0)
+  errorCode            String?
+  createdAt            DateTime                  @default(now())
+  updatedAt            DateTime                  @updatedAt
+  schedule             Schedule                  @relation(fields: [scheduleId], references: [id], onDelete: Cascade)
+  run                  Run?                      @relation(fields: [runId], references: [id], onDelete: SetNull)
+  webhookEvents        WebhookEvent[]
+
+  @@unique([scheduleId, scheduledFor])
+  @@index([status, nextAttemptAt])
+  @@index([scheduleId, scheduledFor])
+}
+
+model Notification {
+  id                String                 @id @default(cuid())
+  userId            String
+  type              NotificationType
+  title             String
+  payload           Json
+  idempotencyKey    String                 @unique
+  runId             String?
+  scheduleId        String?
+  subscriptionId    String?
+  accountDeletionId String?
+  createdAt         DateTime               @default(now())
+  readAt            DateTime?
+  user              User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  run               Run?                   @relation(fields: [runId], references: [id], onDelete: SetNull)
+  schedule          Schedule?              @relation(fields: [scheduleId], references: [id], onDelete: SetNull)
+  subscription      Subscription?          @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
+  accountDeletion   AccountDeletion?       @relation(fields: [accountDeletionId], references: [id], onDelete: SetNull)
+  deliveries        NotificationDelivery[]
+
+  @@index([userId, createdAt])
+  @@index([userId, readAt, createdAt])
+  @@index([runId])
+  @@index([scheduleId])
+}
+
+model NotificationDelivery {
+  id                   String                     @id @default(cuid())
+  notificationId       String
+  channel              NotificationChannel        @default(EMAIL)
+  recipientEmail       String
+  status               NotificationDeliveryStatus @default(PENDING)
+  attemptCount         Int                        @default(0)
+  nextAttemptAt        DateTime                   @default(now())
+  processingLeaseUntil DateTime?
+  providerMessageId    String?
+  failureCode          String?
+  failureMessage       String?
+  createdAt            DateTime                   @default(now())
+  updatedAt            DateTime                   @updatedAt
+  sentAt               DateTime?
+  notification         Notification               @relation(fields: [notificationId], references: [id], onDelete: Cascade)
+
+  @@unique([notificationId, channel])
+  @@index([status, nextAttemptAt])
+  @@index([processingLeaseUntil])
+}
+
+model NotificationPreference {
+  id               String   @id @default(cuid())
+  userId           String   @unique
+  emailEnabled     Boolean  @default(true)
+  runSuccess       Boolean  @default(false)
+  runFailure       Boolean  @default(true)
+  runCanceled      Boolean  @default(false)
+  scheduledAlerts  Boolean  @default(true)
+  billingAlerts    Boolean  @default(true)
+  usageAlerts      Boolean  @default(true)
+  accountLifecycle Boolean  @default(true)
+  dailyDigest      Boolean  @default(false)
+  timezone         String   @default("UTC")
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model WebhookEndpoint {
+  id                  String                @id @default(cuid())
+  userId              String
+  name                String
+  url                 String
+  status              WebhookEndpointStatus @default(ENABLED)
+  eventTypes          String[]
+  secretCiphertext    String
+  secretIv            String
+  secretTag           String
+  secretPrefix        String
+  secretVersion       Int                   @default(1)
+  consecutiveFailures Int                   @default(0)
+  disabledAt          DateTime?
+  lastSuccessAt       DateTime?
+  lastFailureAt       DateTime?
+  createdAt           DateTime              @default(now())
+  updatedAt           DateTime              @updatedAt
+  user                User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deliveries          WebhookDelivery[]
+
+  @@index([userId, status])
+  @@index([status, updatedAt])
+}
+
+model WebhookEvent {
+  id             String               @id @default(cuid())
+  userId         String
+  type           String
+  version        Int                  @default(1)
+  payload        Json
+  idempotencyKey String               @unique
+  runId          String?
+  scheduleId     String?
+  occurrenceId   String?
+  createdAt      DateTime             @default(now())
+  user           User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  run            Run?                 @relation(fields: [runId], references: [id], onDelete: SetNull)
+  schedule       Schedule?            @relation(fields: [scheduleId], references: [id], onDelete: SetNull)
+  occurrence     ScheduledOccurrence? @relation(fields: [occurrenceId], references: [id], onDelete: SetNull)
+  deliveries     WebhookDelivery[]
+
+  @@index([userId, createdAt])
+  @@index([runId])
+  @@index([scheduleId])
+  @@index([occurrenceId])
+  @@index([type, createdAt])
+}
+
+model WebhookDelivery {
+  id                   String                @id @default(cuid())
+  eventId              String
+  endpointId           String
+  sequence             Int                   @default(0)
+  status               WebhookDeliveryStatus @default(PENDING)
+  attemptCount         Int                   @default(0)
+  nextAttemptAt        DateTime              @default(now())
+  processingLeaseUntil DateTime?
+  firstAttemptAt       DateTime?
+  lastAttemptAt        DateTime?
+  deliveredAt          DateTime?
+  httpStatus           Int?
+  failureCode          String?
+  durationMs           Int?
+  createdAt            DateTime              @default(now())
+  updatedAt            DateTime              @updatedAt
+  event                WebhookEvent          @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  endpoint             WebhookEndpoint       @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+
+  @@unique([eventId, endpointId, sequence])
+  @@index([status, nextAttemptAt])
+  @@index([processingLeaseUntil])
+  @@index([endpointId, createdAt])
+  @@index([eventId, createdAt])
 }

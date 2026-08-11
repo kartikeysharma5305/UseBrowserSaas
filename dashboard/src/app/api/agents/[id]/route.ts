@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { Prisma } from '@prisma/client';
 
 import {
   handleValidationError,
@@ -9,6 +10,12 @@ import {
 } from '@/lib/api/route-helpers';
 import { agentIdSchema, updateAgentSchema } from '@/lib/api/schemas';
 import { prisma } from '@/lib/db/prisma';
+import { getOwnedAgentWithVariables } from '@/lib/agents/service';
+import { detectedPlaceholders } from '@/lib/variables/resolver';
+import {
+  normalizeSafetyPolicy,
+  safetyPolicyInput,
+} from '@/lib/execution-safety/policy';
 
 export async function GET(
   _request: NextRequest,
@@ -27,13 +34,21 @@ export async function GET(
     return handleValidationError(parsed.error);
   }
 
-  const agent = await verifyAgentAccess(parsed.data.id, user.id);
+  const agent = await getOwnedAgentWithVariables(user.id, parsed.data.id);
 
   if (!agent) {
     return jsonError('Agent not found.', 404);
   }
 
-  return NextResponse.json({ data: agent });
+  return NextResponse.json({
+    data: {
+      ...agent,
+      safetyPolicy: normalizeSafetyPolicy(
+        agent.safetyPolicy,
+        agent.targetWebsite
+      ),
+    },
+  });
 }
 
 export async function PATCH(
@@ -66,6 +81,26 @@ export async function PATCH(
   }
 
   try {
+    const declared = new Set(
+      (
+        await getOwnedAgentWithVariables(user.id, parsedId.data.id)
+      )?.variables.map((variable) => variable.key) ?? []
+    );
+    const undeclared = detectedPlaceholders(
+      parsedBody.data.goal ?? existingAgent.goal,
+      parsedBody.data.targetWebsite ?? existingAgent.targetWebsite
+    ).find((key) => !declared.has(key));
+    if (undeclared)
+      return jsonError(
+        `Declare the ${undeclared} variable before saving.`,
+        400
+      );
+    const effectiveTarget =
+      parsedBody.data.targetWebsite ?? existingAgent.targetWebsite;
+    const effectivePolicy = normalizeSafetyPolicy(
+      parsedBody.data.safetyPolicy ?? existingAgent.safetyPolicy,
+      effectiveTarget
+    );
     const updatedAgent = await prisma.agent.update({
       where: {
         id: parsedId.data.id,
@@ -88,6 +123,19 @@ export async function PATCH(
           : {}),
         ...(parsedBody.data.configuration
           ? { configuration: parsedBody.data.configuration }
+          : {}),
+        ...(parsedBody.data.outputSchema !== undefined
+          ? {
+              outputSchema:
+                parsedBody.data.outputSchema === null
+                  ? Prisma.JsonNull
+                  : (parsedBody.data
+                      .outputSchema as unknown as Prisma.InputJsonValue),
+            }
+          : {}),
+        ...(parsedBody.data.safetyPolicy !== undefined ||
+        parsedBody.data.targetWebsite !== undefined
+          ? { safetyPolicy: safetyPolicyInput(effectivePolicy) }
           : {}),
       },
     });
@@ -121,10 +169,16 @@ export async function DELETE(
     return jsonError('Agent not found.', 404);
   }
 
-  await prisma.agent.delete({
-    where: {
-      id: parsed.data.id,
-    },
+  await prisma.$transaction(async (transaction) => {
+    const scheduleIds = await transaction.schedule.findMany({
+      where: { agentId: parsed.data.id, userId: user.id },
+      select: { id: true },
+      orderBy: { id: 'asc' },
+    });
+    for (const schedule of scheduleIds)
+      await transaction.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`schedule:${schedule.id}`}, 0))`;
+    await transaction.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`agent:${parsed.data.id}`}, 0))`;
+    await transaction.agent.delete({ where: { id: parsed.data.id } });
   });
 
   return NextResponse.json({ deleted: true, id: parsed.data.id });

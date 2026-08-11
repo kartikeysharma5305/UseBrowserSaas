@@ -1,0 +1,193 @@
+openapi: 3.1.0
+info:
+  title: Browser Automation SaaS Public API
+  version: 1.0.0
+servers:
+  - url: https://your-dashboard.example/api/v1
+security:
+  - bearerApiKey: []
+paths:
+  /agents:
+    get:
+      summary: List owned Agents
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - { name: status, in: query, schema: { type: string } }
+      responses:
+        {
+          '200': { $ref: '#/components/responses/Success' },
+          '401': { $ref: '#/components/responses/Error' },
+          '429': { $ref: '#/components/responses/Error' },
+        }
+  /agents/{id}:
+    get:
+      summary: Get an owned Agent
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        {
+          '200': { $ref: '#/components/responses/Success' },
+          '404': { $ref: '#/components/responses/Error' },
+        }
+  /agents/{id}/runs:
+    post:
+      summary: Queue an idempotent Run through trusted admission
+      parameters:
+        - $ref: '#/components/parameters/Id'
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, minLength: 8, maxLength: 128 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                {
+                  variables:
+                    {
+                      type: object,
+                      additionalProperties:
+                        {
+                          oneOf:
+                            [
+                              { type: string },
+                              { type: number },
+                              { type: boolean },
+                            ],
+                        },
+                    },
+                }
+      responses:
+        {
+          '202': { $ref: '#/components/responses/Success' },
+          '409': { $ref: '#/components/responses/Error' },
+          '429': { $ref: '#/components/responses/Error' },
+        }
+  /runs:
+    get:
+      summary: List owned Runs
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - { name: status, in: query, schema: { type: string } }
+        - { name: agentId, in: query, schema: { type: string } }
+        - {
+            name: createdAfter,
+            in: query,
+            schema: { type: string, format: date-time },
+          }
+        - {
+            name: createdBefore,
+            in: query,
+            schema: { type: string, format: date-time },
+          }
+      responses: { '200': { $ref: '#/components/responses/Success' } }
+  /runs/{id}:
+    get:
+      summary: Get an owned Run
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        {
+          '200': { $ref: '#/components/responses/Success' },
+          '404': { $ref: '#/components/responses/Error' },
+        }
+  /runs/{id}/cancel:
+    post:
+      summary: Cancel an owned Run
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      requestBody:
+        content:
+          {
+            application/json:
+              {
+                schema:
+                  {
+                    type: object,
+                    additionalProperties: false,
+                    properties: { reason: { type: string, maxLength: 240 } },
+                  },
+              },
+          }
+      responses:
+        {
+          '200': { $ref: '#/components/responses/Success' },
+          '202': { $ref: '#/components/responses/Success' },
+        }
+  /runs/{id}/result:
+    get:
+      summary: Get safe structured-result state and validated data
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        {
+          '200': { $ref: '#/components/responses/Success' },
+          '404': { $ref: '#/components/responses/Error' },
+        }
+  /runs/{id}/artifacts:
+    get:
+      summary: List safe artifact metadata
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses: { '200': { $ref: '#/components/responses/Success' } }
+  /artifacts/{id}:
+    get:
+      summary: Stream an authorized private artifact
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        {
+          '200': { description: Private artifact stream },
+          '404': { $ref: '#/components/responses/Error' },
+        }
+components:
+  securitySchemes:
+    bearerApiKey:
+      { type: http, scheme: bearer, bearerFormat: bua_live_placeholder }
+  parameters:
+    Id: { name: id, in: path, required: true, schema: { type: string } }
+    Limit:
+      {
+        name: limit,
+        in: query,
+        schema: { type: integer, minimum: 1, maximum: 100, default: 25 },
+      }
+    Cursor:
+      { name: cursor, in: query, schema: { type: string, maxLength: 512 } }
+  responses:
+    Success:
+      description: Successful private response
+      content:
+        {
+          application/json:
+            {
+              schema:
+                { type: object, required: [data], properties: { data: {} } },
+            },
+        }
+    Error:
+      description: Safe public error
+      content:
+        {
+          application/json:
+            {
+              schema:
+                {
+                  type: object,
+                  required: [error],
+                  properties:
+                    {
+                      error:
+                        {
+                          type: object,
+                          required: [code, message],
+                          properties:
+                            {
+                              code: { type: string },
+                              message: { type: string },
+                            },
+                        },
+                    },
+                },
+            },
+        }

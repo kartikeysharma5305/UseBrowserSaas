@@ -423,6 +423,61 @@ const agent = new Agent({
 
 ## 🛠️ Development
 
+### One-command local development
+
+From the repository root:
+
+```bash
+pnpm dev:all
+```
+
+This performs a safe preflight, builds the root engine once, generates the
+Prisma client, checks migration status without applying migrations, and then
+starts three supervised processes:
+
+- `engine`: root TypeScript build watch
+- `dashboard`: Next.js at `http://localhost:3001`
+- `worker`: the BullMQ browser worker
+
+Logs are prefixed with those names. Press `Ctrl+C` once to stop the complete
+process tree. If any required child exits, the other children are terminated
+and the command exits non-zero.
+
+Prerequisites are Node.js 20+, pnpm, PostgreSQL, Redis, a configured Groq key,
+and `dashboard/.env.local` based on `dashboard/.env.example`. The required
+server variables are `DATABASE_URL`, `REDIS_URL`, `GROQ_API_KEY`,
+`BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`, and `BETTER_AUTH_TRUSTED_ORIGINS`.
+Artifact storage defaults to local; S3 mode must have a reachable private
+bucket. Restart `pnpm dev:all` after changing `dashboard/.env.local`.
+
+For repository-managed development infrastructure, install Docker Compose and
+set these matching dashboard values:
+
+```text
+DATABASE_URL=postgresql://browser_use:browser_use_dev@127.0.0.1:5432/browser_use_dashboard
+REDIS_URL=redis://127.0.0.1:6379
+```
+
+Then choose one of:
+
+```bash
+pnpm dev:infra       # PostgreSQL and Redis only
+pnpm setup:local     # Safe migrations, Prisma generate, root build
+pnpm dev:all:docker  # Start infra, then complete application
+pnpm dev:infra:stop  # Stop development infrastructure; retain volumes
+pnpm dev:infra:reset # Destructive: stop infra and delete volumes
+```
+
+`pnpm setup:local` assumes PostgreSQL and Redis are already running; run
+`pnpm dev:infra` first only when you want the Docker services. `pnpm dev:all`
+and `pnpm dev:all:docker` never apply or reset migrations. If migrations are
+pending, run `pnpm setup:local`. Common preflight failures identify a missing
+variable, unreachable PostgreSQL/Redis/S3 service, stale auth port, unsupported
+Node version, invalid Prisma schema, or occupied dashboard port without printing
+credentials. PostgreSQL uses port 5432, Redis 6379, and the dashboard 3001; the
+engine watcher and worker do not open public ports. Use
+`pnpm dashboard:queue:health` to verify queue connectivity and worker counts.
+
 ```bash
 # Install dependencies
 pnpm install
@@ -446,7 +501,7 @@ pnpm exec tsx examples/simple-search.ts
 
 ## Requirements
 
-- **Node.js** >= 18.0.0
+- **Node.js** >= 20.0.0 for dashboard development
 - **LLM API Key** — At least one supported provider
 - **Playwright** — Installed automatically as a dependency
 

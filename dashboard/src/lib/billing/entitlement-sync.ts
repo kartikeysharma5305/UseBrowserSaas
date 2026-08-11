@@ -1,137 +1,188 @@
-import 'server-only';
-
-// Accept plain Stripe objects (avoid tight dependency on Stripe TS shape during sync)
 import type Stripe from 'stripe';
-import { prisma } from '../db/prisma';
+import type { Prisma } from '@prisma/client';
+
+import { prisma } from '@/lib/db/prisma';
+import {
+  chooseUserPlanAfterStripeUpdate,
+  getEffectivePlanFromSubscription,
+} from './access';
 import { planCodeForStripePrice } from './price-catalogue';
 import { STRIPE_TO_LOCAL_SUBSCRIPTION_STATUS } from './types';
-import { chooseUserPlanAfterStripeUpdate } from './access';
 
-interface SyncInput {
-  eventId: string;
-  eventCreatedAt: number; // epoch seconds from Stripe event.created
-  // subscription can be a Stripe.Subscription or a plain JS object received from webhook
-  subscription: any;
+interface SyncStripeSubscriptionOptions {
+  stripeEventId: string;
+  stripeEventCreatedAt: Date;
+  fallbackUserId?: string;
+}
+
+/** The webhook is retained as failed for reconciliation, after recording FREE state. */
+export class UnknownStripePriceError extends Error {
+  constructor() {
+    super('Stripe subscription references an unconfigured price.');
+    this.name = 'UnknownStripePriceError';
+  }
+}
+
+function stripeId(value: string | { id: string } | null | undefined) {
+  return value ? (typeof value === 'string' ? value : value.id) : null;
+}
+
+function toDate(value: number | null | undefined) {
+  return value ? new Date(value * 1000) : null;
+}
+
+async function resolveUser(
+  tx: Prisma.TransactionClient,
+  stripeCustomerId: string | null,
+  fallbackUserId?: string
+) {
+  if (stripeCustomerId) {
+    const mapped = await tx.user.findUnique({
+      where: { stripeCustomerId },
+      select: {
+        id: true,
+        planCode: true,
+        planSource: true,
+        stripeCustomerId: true,
+      },
+    });
+    if (mapped) return mapped;
+  }
+  if (!fallbackUserId) return null;
+
+  const user = await tx.user.findUnique({
+    where: { id: fallbackUserId },
+    select: {
+      id: true,
+      planCode: true,
+      planSource: true,
+      stripeCustomerId: true,
+    },
+  });
+  if (!user) return null;
+  if (
+    stripeCustomerId &&
+    user.stripeCustomerId &&
+    user.stripeCustomerId !== stripeCustomerId
+  ) {
+    throw new Error('Stripe customer does not match the local user mapping.');
+  }
+  if (stripeCustomerId && !user.stripeCustomerId) {
+    await tx.user.update({
+      where: { id: user.id },
+      data: { stripeCustomerId },
+    });
+    return { ...user, stripeCustomerId };
+  }
+  return user;
 }
 
 /**
- * Synchronize a verified Stripe subscription into local Subscription and User plan state.
- *
- * Guarantees and behaviors:
- * - Idempotent for the same eventId.
- * - Older events (by eventCreatedAt) will not overwrite newer state.
- * - Unknown price IDs will not grant PRO and will be recorded in the Subscription.stripePriceId field.
- * - INTERNAL user plan is preserved by chooseUserPlanAfterStripeUpdate.
+ * The single authoritative Stripe-to-local state transition. It stores every
+ * verified subscription snapshot, updates the user in the same transaction,
+ * and ignores snapshots no newer than the stored Stripe event timestamp.
  */
-export async function syncStripeSubscriptionToLocal(input: SyncInput) {
-  const { eventId, eventCreatedAt, subscription } = input;
+export async function syncStripeSubscription(
+  subscription: Stripe.Subscription,
+  options: SyncStripeSubscriptionOptions
+) {
+  if (!subscription.id)
+    throw new Error('Stripe subscription payload is missing an ID.');
 
-  const stripeSubscriptionId = subscription.id;
-  const stripeCustomerId = typeof subscription.customer === 'string' ? subscription.customer : (subscription.customer as any)?.id;
+  const stripeCustomerId = stripeId(subscription.customer);
+  const item = subscription.items.data[0];
+  const priceId = stripeId(item?.price) ?? '';
+  const configuredPlan = planCodeForStripePrice(priceId);
+  const planCode = configuredPlan ?? 'FREE';
+  const status =
+    STRIPE_TO_LOCAL_SUBSCRIPTION_STATUS[subscription.status] ?? 'INCOMPLETE';
+  const currentPeriodStart = toDate(item?.current_period_start);
+  const currentPeriodEnd = toDate(item?.current_period_end);
+  const eventCreatedAt = options.stripeEventCreatedAt;
 
-  // Resolve price id from first item (supporting simple single-price subscriptions)
-  const priceId =
-    (subscription.items?.data && subscription.items.data[0]?.price?.id) ||
-    (subscription.items?.data && (subscription.items.data[0] as any)?.price_id) ||
-    null;
-
-  // Map subscription status
-  const stripeStatus = (subscription.status ?? '') as string;
-  const localStatus = (STRIPE_TO_LOCAL_SUBSCRIPTION_STATUS as Record<string, string>)[stripeStatus] ?? 'INCOMPLETE';
-
-  // Map plan code using price catalogue
-  const planCode = priceId ? planCodeForStripePrice(priceId) : null;
-  const effectivePlanCode = planCode ?? 'FREE';
-
-  // Convert epoch timestamps (Stripe often uses seconds)
-  function toDate(value: number | null | undefined) {
-    if (!value) return null;
-    // If appears to be milliseconds, normalize: treat large numbers as ms
-    if (value > 1e12) return new Date(value);
-    return new Date(value * 1000);
-  }
-
-  const currentPeriodStart = toDate((subscription.current_period_start as any) ?? (subscription.current_period?.start as any));
-  const currentPeriodEnd = toDate((subscription.current_period_end as any) ?? (subscription.current_period?.end as any));
-  const canceledAt = toDate((subscription.canceled_at as any) ?? (subscription.ended_at as any));
-  const trialEndsAt = toDate((subscription.trial_end as any) ?? (subscription.trial_period_end as any));
-  const cancelAtPeriodEnd = !!subscription.cancel_at_period_end;
-
-  // Transactional upsert & user update with ordering protection
-  return await prisma.$transaction(async (tx) => {
-    // Find user by stripeCustomerId
-    const user = await tx.user.findUnique({ where: { stripeCustomerId: stripeCustomerId ?? undefined } });
-    if (!user) {
-      // No local user mapping for this Stripe customer. Record the subscription row with no userId (not allowed by schema), so instead return a safe error to let caller record the webhook event for reconciliation.
-      throw new Error('No local user for Stripe customer');
+  await prisma.$transaction(async (tx) => {
+    const user = await resolveUser(
+      tx,
+      stripeCustomerId,
+      options.fallbackUserId
+    );
+    if (!user)
+      throw new Error('No local user mapping exists for this Stripe customer.');
+    if (!stripeCustomerId && !user.stripeCustomerId) {
+      throw new Error(
+        'Stripe subscription payload is missing a customer reference.'
+      );
     }
 
-    // Fetch existing subscription if any
-    const existing = await tx.subscription.findUnique({ where: { stripeSubscriptionId } });
+    const existing = await tx.subscription.findUnique({
+      where: { stripeSubscriptionId: subscription.id },
+      select: { lastStripeEventCreatedAt: true },
+    });
+    // Stripe's created timestamp is authoritative. Equal timestamps are left
+    // unchanged: they cannot establish a reliable ordering and replay safety
+    // is preferable to replacing an already accepted snapshot.
+    if (
+      existing?.lastStripeEventCreatedAt &&
+      existing.lastStripeEventCreatedAt >= eventCreatedAt
+    )
+      return;
 
-    const eventDate = new Date(eventCreatedAt * 1000);
-
-    if (existing) {
-      // Ordering protection: if existing.lastStripeEventCreatedAt exists and is newer than this event, ignore
-      if (existing.lastStripeEventCreatedAt && existing.lastStripeEventCreatedAt.getTime() > eventDate.getTime()) {
-        return { action: 'skipped', reason: 'older_event' };
-      }
-
-      // Idempotency: if same event id already recorded, no-op
-      if (existing.lastStripeEventId === eventId) {
-        return { action: 'noop', reason: 'already_processed' };
-      }
-
-      // Update subscription
-      await tx.subscription.update({
-        where: { stripeSubscriptionId },
-        data: {
-          stripeCustomerId: stripeCustomerId ?? existing.stripeCustomerId,
-          stripePriceId: priceId ?? existing.stripePriceId,
-          status: localStatus as any,
-          planCode: effectivePlanCode as any,
-          currentPeriodStart,
-          currentPeriodEnd,
-          cancelAtPeriodEnd,
-          canceledAt,
-          trialEndsAt,
-          lastStripeEventCreatedAt: eventDate,
-          lastStripeEventId: eventId,
-        },
-      });
-    } else {
-      // Create subscription row
-      await tx.subscription.create({
-        data: {
-          userId: user.id,
-          provider: 'STRIPE',
-          stripeSubscriptionId,
-          stripeCustomerId: stripeCustomerId ?? '',
-          stripePriceId: priceId ?? '',
-          status: localStatus as any,
-          planCode: effectivePlanCode as any,
-          currentPeriodStart,
-          currentPeriodEnd,
-          cancelAtPeriodEnd,
-          canceledAt,
-          trialEndsAt,
-          lastStripeEventCreatedAt: eventDate,
-          lastStripeEventId: eventId,
-        },
-      });
-    }
-
-    // Decide effective user plan using existing helper which protects INTERNAL
-    const decision = chooseUserPlanAfterStripeUpdate({
+    const effectivePlan = getEffectivePlanFromSubscription({
+      status,
+      planCode,
+      currentPeriodEnd,
+      cancelAtPeriodEnd: subscription.cancel_at_period_end ?? false,
+    });
+    const userPlan = chooseUserPlanAfterStripeUpdate({
       currentPlanCode: user.planCode,
       currentPlanSource: user.planSource,
-      subscriptionPlan: effectivePlanCode as any,
+      subscriptionPlan: effectivePlan,
     });
 
-    if (decision.planCode !== user.planCode || decision.planSource !== user.planSource) {
-      await tx.user.update({ where: { id: user.id }, data: { planCode: decision.planCode, planSource: decision.planSource, planAssignedAt: new Date() } });
-    }
-
-    return { action: 'applied' };
+    await tx.subscription.upsert({
+      where: { stripeSubscriptionId: subscription.id },
+      create: {
+        userId: user.id,
+        provider: 'STRIPE',
+        stripeSubscriptionId: subscription.id,
+        stripeCustomerId: stripeCustomerId ?? user.stripeCustomerId!,
+        stripePriceId: priceId,
+        status,
+        planCode,
+        currentPeriodStart,
+        currentPeriodEnd,
+        cancelAtPeriodEnd: subscription.cancel_at_period_end ?? false,
+        canceledAt: toDate(subscription.canceled_at),
+        trialEndsAt: toDate(subscription.trial_end),
+        lastStripeEventCreatedAt: eventCreatedAt,
+        lastStripeEventId: options.stripeEventId,
+      },
+      update: {
+        stripeCustomerId: stripeCustomerId ?? user.stripeCustomerId!,
+        stripePriceId: priceId,
+        status,
+        planCode,
+        currentPeriodStart,
+        currentPeriodEnd,
+        cancelAtPeriodEnd: subscription.cancel_at_period_end ?? false,
+        canceledAt: toDate(subscription.canceled_at),
+        trialEndsAt: toDate(subscription.trial_end),
+        lastStripeEventCreatedAt: eventCreatedAt,
+        lastStripeEventId: options.stripeEventId,
+      },
+    });
+    await tx.user.update({
+      where: { id: user.id },
+      data: {
+        planCode: userPlan.planCode,
+        planSource: userPlan.planSource,
+        ...(userPlan.planCode !== user.planCode ||
+        userPlan.planSource !== user.planSource
+          ? { planAssignedAt: new Date() }
+          : {}),
+      },
+    });
   });
+
+  if (!configuredPlan) throw new UnknownStripePriceError();
 }

@@ -1,0 +1,33 @@
+version: 1
+processes:
+  web:
+    command: pnpm --dir dashboard start:dashboard
+    dependencies: [postgresql, redis, built-dashboard]
+    health: GET /api/internal/health with operator bearer token
+    readiness: GET /api/internal/readiness with operator bearer token
+    restart: on-failure
+    replicas: deployment-defined
+  browser-worker:
+    command: pnpm --dir dashboard start:worker
+    dependencies: [postgresql, redis, built-root-engine]
+    health: WorkerInstance heartbeat in PostgreSQL
+    restart: on-failure
+    concurrency: BROWSER_WORKER_CONCURRENCY (1-10; start at 1)
+  scheduler:
+    command: pnpm --dir dashboard start:scheduler
+    dependencies: [postgresql, redis]
+    health: operations:heartbeat:scheduler
+    restart: on-failure
+    replicas: 1 recommended; database coordination preserves correctness
+  notification-worker:
+    command: pnpm --dir dashboard start:notifications
+    dependencies: [postgresql, redis, optional-email-provider]
+    health: operations:heartbeat:notification-worker
+    restart: on-failure
+    concurrency: NOTIFICATION_QUEUE_CONCURRENCY (1-20; start at 3)
+  webhook-worker:
+    command: pnpm --dir dashboard start:webhooks
+    dependencies: [postgresql, redis, outbound-https]
+    health: operations:heartbeat:webhook-worker
+    restart: on-failure
+    concurrency: WEBHOOK_QUEUE_CONCURRENCY (1-20; start at 4)

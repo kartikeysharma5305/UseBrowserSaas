@@ -4,22 +4,14 @@ import { useMemo, useEffect, useRef, useState } from 'react';
 
 import { EmptyState } from '@/components/dashboard/empty-state';
 import { ErrorState } from '@/components/dashboard/error-state';
-import { LoadingSkeleton } from '@/components/dashboard/loading-skeleton';
 import { RunTable } from '@/components/dashboard/run-table';
 import { Button } from '@/components/ui/button';
-
-type Run = {
-  id: string;
-  status: string;
-  startedAt: string;
-  completedAt?: string | null;
-  duration?: number | null;
-  result?: string | null;
-  agent?: { name?: string } | null;
-};
+import { Card } from '@/components/ui/card';
+import type { RunRecord, RunsResponse } from '@/lib/types';
+import { getRunResultSearchText } from '@/lib/utils/format-run-result';
 
 export default function RunsPage() {
-  const [runs, setRuns] = useState<Run[]>([]);
+  const [runs, setRuns] = useState<RunRecord[]>([]);
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('ALL');
   const [loading, setLoading] = useState(true);
@@ -34,12 +26,12 @@ export default function RunsPage() {
         throw new Error('Unable to load runs.');
       }
 
-      const payload = await response.json();
+      const payload: Partial<RunsResponse> = await response.json();
       const data = Array.isArray(payload?.data) ? payload.data : [];
       setRuns(data);
 
       const hasRunning = data.some(
-        (run: Run) => run.status === 'QUEUED' || run.status === 'RUNNING'
+        (run) => run.status === 'QUEUED' || run.status === 'RUNNING'
       );
 
       if (hasRunning) {
@@ -84,11 +76,15 @@ export default function RunsPage() {
   }, [runs]);
 
   const filteredRuns = useMemo(() => {
+    const normalizedQuery = query.trim().toLowerCase();
+
     return runs.filter((run) => {
       const matchesQuery =
-        query.trim().length === 0 ||
-        (run.agent?.name ?? '').toLowerCase().includes(query.toLowerCase()) ||
-        (run.result ?? '').toLowerCase().includes(query.toLowerCase());
+        normalizedQuery.length === 0 ||
+        (run.agent?.name ?? '').toLowerCase().includes(normalizedQuery) ||
+        getRunResultSearchText(run.result)
+          .toLowerCase()
+          .includes(normalizedQuery);
 
       const matchesStatus =
         statusFilter === 'ALL' || run.status.toUpperCase() === statusFilter;
@@ -98,7 +94,22 @@ export default function RunsPage() {
   }, [query, runs, statusFilter]);
 
   if (loading) {
-    return <LoadingSkeleton lines={5} />;
+    return (
+      <div className="space-y-6">
+        <div className="h-8 w-48 animate-pulse rounded-lg bg-slate-100 dark:bg-slate-800" />
+        <div className="h-10 w-full animate-pulse rounded-lg bg-slate-50 dark:bg-slate-700" />
+        <Card className="overflow-hidden">
+          <div className="space-y-3 p-4">
+            {Array.from({ length: 5 }).map((_, i) => (
+              <div
+                key={i}
+                className="h-10 animate-pulse rounded-lg bg-slate-50 dark:bg-slate-700"
+              />
+            ))}
+          </div>
+        </Card>
+      </div>
+    );
   }
 
   if (error) {
@@ -109,27 +120,30 @@ export default function RunsPage() {
     <div className="space-y-6">
       <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
         <div>
-          <p className="text-sm font-medium text-slate-500">
+          <p className="text-sm font-medium text-slate-500 dark:text-slate-400">
             Execution history
           </p>
-          <h1 className="text-3xl font-semibold text-slate-900">Runs</h1>
+          <h1 className="text-3xl font-semibold text-slate-900 dark:text-white">
+            Runs
+          </h1>
         </div>
         <div className="flex flex-col gap-2 md:flex-row">
           <input
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             placeholder="Search by agent or result"
-            className="rounded-lg border px-3 py-2"
+            className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 transition-colors placeholder:text-slate-400 focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-300 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:placeholder:text-slate-500 dark:focus:border-slate-600 dark:focus:ring-slate-600"
           />
           <select
             value={statusFilter}
             onChange={(event) => setStatusFilter(event.target.value)}
-            className="rounded-lg border px-3 py-2"
+            className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 transition-colors focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-300 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:focus:border-slate-600 dark:focus:ring-slate-600"
           >
             <option value="ALL">All statuses</option>
             <option value="SUCCESS">Success</option>
             <option value="FAILED">Failed</option>
             <option value="RUNNING">Running</option>
+            <option value="TIMED_OUT">Timed out</option>
           </select>
         </div>
       </div>

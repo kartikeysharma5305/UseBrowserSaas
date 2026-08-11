@@ -260,6 +260,7 @@ interface AgentConstructorParams<Context, AgentStructuredOutput> {
   register_external_agent_status_raise_error_callback?:
     | (() => Promise<boolean>)
     | null;
+  register_signal_handlers?: boolean;
   output_model_schema?: StructuredOutputParser<AgentStructuredOutput> | null;
   extraction_schema?: Record<string, unknown> | null;
   use_vision?: boolean | 'auto';
@@ -668,6 +669,7 @@ export class Agent<
     Context,
     AgentStructuredOutput
   >['register_external_agent_status_raise_error_callback'];
+  register_signal_handlers: boolean;
   context: Context | null;
   telemetry: ProductTelemetry;
   eventbus: EventBus;
@@ -747,6 +749,7 @@ export class Agent<
       register_done_callback = null,
       register_should_stop_callback = null,
       register_external_agent_status_raise_error_callback = null,
+      register_signal_handlers = true,
       output_model_schema = null,
       extraction_schema = null,
       use_vision = true,
@@ -1030,6 +1033,7 @@ export class Agent<
     this.register_should_stop_callback = register_should_stop_callback;
     this.register_external_agent_status_raise_error_callback =
       register_external_agent_status_raise_error_callback;
+    this.register_signal_handlers = register_signal_handlers;
     this.context = context as Context | null;
     this.agent_directory = Agent.DEFAULT_AGENT_DATA_DIR;
 
@@ -2660,7 +2664,9 @@ export class Agent<
       },
       exit_on_second_int: true,
     });
-    signal_handler.register();
+    if (this.register_signal_handlers) {
+      signal_handler.register();
+    }
 
     try {
       await this._log_agent_run();
@@ -2854,7 +2860,9 @@ export class Agent<
       throw error;
     } finally {
       await this.token_cost_service.log_usage_summary();
-      signal_handler.unregister();
+      if (this.register_signal_handlers) {
+        signal_handler.unregister();
+      }
 
       if (!this._force_exit_telemetry_logged) {
         try {
@@ -5130,8 +5138,12 @@ export class Agent<
     const include_trace = this.logger.level === 'debug';
     const error_msg = AgentError.format_error(error, include_trace);
     const maxTotalFailures = this._max_total_failures();
-    const prefix = `❌ Result failed ${this.state.consecutive_failures + 1}/${maxTotalFailures} times: `;
-    this.state.consecutive_failures += 1;
+    const failureCount =
+      error instanceof ModelRateLimitError
+        ? maxTotalFailures
+        : this.state.consecutive_failures + 1;
+    const prefix = `❌ Result failed ${failureCount}/${maxTotalFailures} times: `;
+    this.state.consecutive_failures = failureCount;
 
     const isFinalFailure = this.state.consecutive_failures >= maxTotalFailures;
     const isParseError =

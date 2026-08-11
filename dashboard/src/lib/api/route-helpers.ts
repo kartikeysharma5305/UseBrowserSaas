@@ -1,15 +1,25 @@
 import { NextResponse } from 'next/server';
-import type { Agent, User } from '@prisma/client';
+import type { User } from '@prisma/client';
 import { ZodError, type ZodType } from 'zod';
 
 import { getCurrentUser } from '@/lib/auth/helpers';
 import { prisma } from '@/lib/db/prisma';
+import { SECURITY_POLICY, validateJsonShape } from '@/lib/security/policy';
+import { recordSecurityRejection } from '@/lib/operations/signals';
 
 /**
  * Helper to return a JSON error response
  */
-export function jsonError(message: string, status = 400) {
-  return NextResponse.json({ error: message }, { status });
+export function jsonError(
+  message: string,
+  status = 400,
+  code?: string,
+  details?: { activeRunId?: string }
+) {
+  return NextResponse.json(
+    code ? { error: message, code, ...details } : { error: message },
+    { status }
+  );
 }
 
 /**
@@ -31,13 +41,13 @@ export function handleValidationError(error: unknown) {
  * Returns null if not authenticated
  */
 export async function requireAuthenticatedUser(): Promise<User | null> {
-  const user = await getCurrentUser();
+  const sessionUser = await getCurrentUser();
 
-  if (!user) {
+  if (!sessionUser) {
     return null;
   }
 
-  return user as User;
+  return prisma.user.findUnique({ where: { id: sessionUser.id } });
 }
 
 /**
@@ -55,23 +65,6 @@ export async function verifyAgentAccess(agentId: string, userId: string) {
 }
 
 /**
- * Require that the user owns the agent, throw error if not
- * Used in API routes that modify or delete agents
- */
-export async function requireAgentOwnership(
-  agentId: string,
-  userId: string
-): Promise<Agent> {
-  const agent = await verifyAgentAccess(agentId, userId);
-
-  if (!agent) {
-    throw new Error('Agent not found or access denied.');
-  }
-
-  return agent;
-}
-
-/**
  * Check if a user owns a specific run record
  * Through ownership of the agent that created the run
  * Returns the run with related agent and events
@@ -86,26 +79,15 @@ export async function verifyRunAccess(runId: string, userId: string) {
     },
     include: {
       agent: true,
-      events: true,
+      events: {
+        orderBy: [{ sequence: 'asc' }, { timestamp: 'asc' }],
+      },
+      artifacts: {
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      },
     },
   });
 }
-
-/**
- * Require that the user owns the run, throw error if not
- */
-export async function requireRunOwnership(runId: string, userId: string) {
-  const run = await verifyRunAccess(runId, userId);
-
-  if (!run) {
-    throw new Error('Run not found or access denied.');
-  }
-
-  return run;
-}
-
-export const getOwnedAgent = verifyAgentAccess;
-export const getOwnedRun = verifyRunAccess;
 
 /**
  * Safely parse and validate request body using Zod schema
@@ -114,10 +96,42 @@ export const getOwnedRun = verifyRunAccess;
  */
 export async function parseValidatedBody<T>(
   request: Request,
-  schema: ZodType<T>
+  schema: ZodType<T>,
+  maxBytes = SECURITY_POLICY.bodyBytes.authenticatedJson
 ): Promise<{ ok: true; data: T } | { ok: false; response: NextResponse }> {
+  if (
+    !request.headers
+      .get('content-type')
+      ?.toLowerCase()
+      .startsWith('application/json')
+  )
+    return {
+      ok: false,
+      response: jsonError('Content-Type must be application/json.', 415),
+    };
+  const declared = Number(request.headers.get('content-length') ?? 0);
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    recordSecurityRejection('oversized_body');
+    return {
+      ok: false,
+      response: jsonError('Request body is too large.', 413),
+    };
+  }
   try {
-    const payload = await request.json();
+    const text = await request.text();
+    if (Buffer.byteLength(text, 'utf8') > maxBytes) {
+      recordSecurityRejection('oversized_body');
+      return {
+        ok: false,
+        response: jsonError('Request body is too large.', 413),
+      };
+    }
+    const payload = JSON.parse(text);
+    if (!validateJsonShape(payload))
+      return {
+        ok: false,
+        response: jsonError('Request body is too complex.', 413),
+      };
     const parsed = schema.safeParse(payload);
 
     if (!parsed.success) {

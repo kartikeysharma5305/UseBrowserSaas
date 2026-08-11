@@ -1,21 +1,21 @@
-export type ExecutionStatus = 'queued' | 'running' | 'completed' | 'failed';
+export type ExecutionStatus =
+  | 'queued'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'timed_out';
 
 export interface AgentExecutionInput {
   agentId: string;
   userId: string;
-}
-
-export interface ExecutionEvent {
-  type: string;
-  message: string;
-  data: Record<string, unknown>;
-  timestamp: Date;
-}
-
-export interface ExecutionScreenshot {
-  stepNumber: number | null;
-  path: string | null;
-  base64: string | null;
+  variables?: Record<string, string | number | boolean>;
+  trustedRunId?: string;
+  source?: 'API';
+  scheduled?: {
+    scheduleId: string;
+    occurrenceId: string;
+    scheduledFor: Date;
+  };
 }
 
 export interface AgentExecutionResult {
@@ -24,14 +24,9 @@ export interface AgentExecutionResult {
   startedAt: Date;
   completedAt: Date | null;
   durationMs: number | null;
-  result: string | null;
-  errorMessage: string | null;
-  events: ExecutionEvent[];
-  screenshots: ExecutionScreenshot[];
+  summary: string | null;
   visitedUrls: string[];
-  rawOutput: unknown;
-}
-
-export interface AgentExecutionService {
-  runAgent(input: AgentExecutionInput): Promise<AgentExecutionResult>;
+  eventCount: number;
+  artifactCount: number;
+  detailsUrl: string;
 }

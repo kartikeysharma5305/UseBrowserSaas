@@ -76,6 +76,23 @@ const createBrowserStateSummary = (
 };
 
 describe('Agent constructor browser session alignment', () => {
+  it('allows embedded runtimes to retain ownership of process signals', async () => {
+    const standalone = new Agent({
+      task: 'standalone signal ownership',
+      llm: createLlm(),
+    });
+    const embedded = new Agent({
+      task: 'embedded signal ownership',
+      llm: createLlm(),
+      register_signal_handlers: false,
+    });
+
+    expect(standalone.register_signal_handlers).toBe(true);
+    expect(embedded.register_signal_handlers).toBe(false);
+
+    await Promise.all([standalone.close(), embedded.close()]);
+  });
+
   it('creates BrowserSession from page/context when browser_session is omitted', async () => {
     const fakeContext = { id: 'ctx-1' };
     const fakePage = {
@@ -517,6 +534,9 @@ describe('Agent constructor browser session alignment', () => {
     );
 
     expect(sleepSpy).not.toHaveBeenCalled();
+    expect(agent.state.consecutive_failures).toBe(
+      (agent as any)._max_total_failures()
+    );
     expect(agent.state.last_result?.[0]?.error).toContain(
       'Rate limit exceeded'
     );

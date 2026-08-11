@@ -20,13 +20,3 @@ export async function requireAuth() {
 
   return user;
 }
-
-export async function verifyUserAccess(userId: string) {
-  const user = await getCurrentUser();
-
-  if (!user) {
-    return false;
-  }
-
-  return user.id === userId;
-}
