@@ -11,6 +11,7 @@ import { runIdSchema } from '@/lib/api/schemas';
 import { prisma } from '@/lib/db/prisma';
 import { sanitizePersistedExecutionError } from '@/lib/execution/errors';
 import { isTerminalRunStatus } from '@/lib/execution/run-state';
+import { presentRunDuration } from '@/lib/runs/duration';
 import { acquireStreamLease } from '@/lib/realtime/connection-limits';
 import { getRealtimeConfiguration } from '@/lib/realtime/config';
 import { RunNotificationSubscriber } from '@/lib/realtime/run-notifications';
@@ -181,6 +182,7 @@ export async function GET(
                 lastCancelRequestedAt ||
               isTerminalRunStatus(run.status)
             ) {
+              const duration = presentRunDuration(run);
               lastStatus = run.status;
               lastCancelRequestedAt =
                 run.cancelRequestedAt?.toISOString() ?? null;
@@ -188,9 +190,10 @@ export async function GET(
                 version: RUN_STREAM_VERSION,
                 runId: run.id,
                 status: run.status,
-                startedAt: run.startedAt.toISOString(),
+                startedAt: duration.startedAt.toISOString(),
                 completedAt: run.completedAt?.toISOString() ?? null,
-                duration: run.duration,
+                duration: duration.duration,
+                attemptDuration: duration.attemptDuration,
                 result: toClientJsonValue(run.result),
                 errorMessage: sanitizePersistedExecutionError(run.errorMessage),
                 cancelRequestedAt: run.cancelRequestedAt?.toISOString() ?? null,

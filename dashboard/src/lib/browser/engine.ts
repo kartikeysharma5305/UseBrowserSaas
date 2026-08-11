@@ -1,6 +1,7 @@
 import { getArtifactMaxBytesPerRun } from '@/lib/execution/configuration';
 import {
   ExecutionServiceError,
+  isRetryableExecutionCode,
   safeSerializeError,
   type ExecutionErrorCode,
   type ExecutionStage,
@@ -28,6 +29,7 @@ import {
   installExecutionSafetyGuard,
 } from '@/lib/execution-safety/runtime-guard';
 import { safeEngineDomainPatterns } from '@/lib/execution-safety/domain-policy';
+import { NetworkResolutionError } from '@/lib/execution-safety/network';
 import { recordProviderRunOutcome } from '@/lib/operations/signals';
 
 import {
@@ -199,6 +201,13 @@ function executionFailure(
   if (error instanceof ExecutionServiceError) return error;
   if (error instanceof SafetyPolicyError) {
     return new ExecutionServiceError(error.code, {
+      cause: error,
+      stage: 'agent_run',
+      runId,
+    });
+  }
+  if (error instanceof NetworkResolutionError) {
+    return new ExecutionServiceError('NETWORK_RESOLUTION_FAILED', {
       cause: error,
       stage: 'agent_run',
       runId,
@@ -542,11 +551,7 @@ export class BrowserExecutionService {
 
     if (
       primaryFailure &&
-      [
-        'EXECUTION_UNAVAILABLE',
-        'PROVIDER_UNAVAILABLE',
-        'PROVIDER_TIMEOUT',
-      ].includes(primaryFailure.code) &&
+      isRetryableExecutionCode(primaryFailure.code) &&
       input.finalAttempt === false
     ) {
       await deletePersistedArtifacts(pendingArtifacts);
@@ -589,6 +594,7 @@ export class BrowserExecutionService {
           SAFETY_FAILURE_CODES.includes(
             primaryFailure.code as (typeof SAFETY_FAILURE_CODES)[number]
           ) ||
+          primaryFailure.code === 'NETWORK_RESOLUTION_FAILED' ||
           primaryFailure.code === 'AI_PROVIDER_RATE_LIMITED' ||
           primaryFailure.code.startsWith('PROVIDER_') ||
           primaryFailure.code === 'EXECUTION_STEP_LIMIT_EXCEEDED';

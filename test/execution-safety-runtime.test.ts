@@ -4,10 +4,18 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { normalizeSafetyPolicy } from '@/lib/execution-safety/policy';
 import { ExecutionSafetyGuard, installExecutionSafetyGuard } from '@/lib/execution-safety/runtime-guard';
+import { ExecutionServiceError } from '@/lib/execution/errors';
+import { isRetryableExecutionFailure } from '@/lib/worker/browser-run-processor';
 
 const publicResolver = async () => [{ address: '93.184.216.34', family: 4 }];
 
 describe('worker execution safety guard', () => {
+  it('retries transient DNS resolution but not deterministic safety rejection', () => {
+    expect(isRetryableExecutionFailure(new ExecutionServiceError('NETWORK_RESOLUTION_FAILED'))).toBe(true);
+    expect(isRetryableExecutionFailure(new ExecutionServiceError('PRIVATE_NETWORK_BLOCKED'))).toBe(false);
+    expect(isRetryableExecutionFailure(new ExecutionServiceError('DOMAIN_NOT_ALLOWED'))).toBe(false);
+  });
+
   it('blocks disallowed initial/model navigation and unsafe redirects', async () => {
     const guard = new ExecutionSafetyGuard(normalizeSafetyPolicy({ allowedDomains: ['example.com', 'example.org'] }, 'https://example.com'), 'https://example.com', publicResolver);
     await expect(guard.assertNavigation('https://attacker.test')).rejects.toMatchObject({ code: 'DOMAIN_NOT_ALLOWED' });

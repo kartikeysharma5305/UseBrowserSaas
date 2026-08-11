@@ -7,6 +7,7 @@ import { normalizeAgentConfiguration } from '@/lib/execution/agent-configuration
 import {
   EXECUTION_ERROR_DEFINITIONS,
   ExecutionServiceError,
+  isRetryableExecutionCode,
   safeSerializeError,
 } from '@/lib/execution/errors';
 import { isTerminalRunStatus } from '@/lib/execution/run-state';
@@ -41,11 +42,7 @@ export function isRetryableExecutionFailure(
 ): error is ExecutionServiceError {
   return (
     error instanceof ExecutionServiceError &&
-    [
-      'EXECUTION_UNAVAILABLE',
-      'PROVIDER_UNAVAILABLE',
-      'PROVIDER_TIMEOUT',
-    ].includes(error.code)
+    isRetryableExecutionCode(error.code)
   );
 }
 

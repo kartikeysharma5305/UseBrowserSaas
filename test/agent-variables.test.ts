@@ -168,6 +168,19 @@ describe('Phase 9 centralized resolution', () => {
     ).toThrowError(expect.objectContaining({ code: 'UNDECLARED_PLACEHOLDER' }));
   });
 
+  it('keeps brace-wrapped prose literal instead of treating it as a variable', () => {
+    const resolved = resolveAgentInput({
+      goal: 'Inspect {{Samsung Galaxy S25 Ultra}} at {{https://www.amazon.in/}}.',
+      targetWebsite: 'https://www.amazon.in/',
+      definitions: [],
+      definitionVersion: 1,
+    });
+    expect(resolved.snapshot.values).toEqual([]);
+    expect(resolved.snapshot.rendered.goal).toContain(
+      '{{Samsung Galaxy S25 Ultra}}'
+    );
+  });
+
   it('performs one plain-text interpolation pass without expression evaluation', () => {
     const resolved = resolveAgentInput({
       goal: 'Search {{city}} and preserve \\{{literal}}.',

@@ -18,6 +18,7 @@ export interface RunRecord {
   startedAt: string;
   completedAt: string | null;
   duration: number | null;
+  attemptDuration?: number | null;
   result: JsonValue;
   outputSchemaSnapshot?: JsonValue;
   outputSchemaVersion?: number | null;
@@ -118,6 +119,7 @@ export interface RunStreamStatus {
   startedAt: string;
   completedAt: string | null;
   duration: number | null;
+  attemptDuration: number | null;
   result: JsonValue;
   errorMessage: string | null;
   cancelRequestedAt: string | null;

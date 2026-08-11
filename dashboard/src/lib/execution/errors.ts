@@ -91,6 +91,10 @@ export const EXECUTION_ERROR_DEFINITIONS = {
     status: 503,
     message: 'Agent execution is temporarily unavailable.',
   },
+  NETWORK_RESOLUTION_FAILED: {
+    status: 503,
+    message: 'The destination hostname could not be resolved. Try again later.',
+  },
   EXECUTION_TIMED_OUT: {
     status: 504,
     message: 'The agent run exceeded its time limit.',
@@ -184,6 +188,18 @@ export const EXECUTION_ERROR_DEFINITIONS = {
 } as const;
 
 export type ExecutionErrorCode = keyof typeof EXECUTION_ERROR_DEFINITIONS;
+
+const RETRYABLE_EXECUTION_ERROR_CODES: ReadonlySet<ExecutionErrorCode> =
+  new Set([
+    'EXECUTION_UNAVAILABLE',
+    'NETWORK_RESOLUTION_FAILED',
+    'PROVIDER_UNAVAILABLE',
+    'PROVIDER_TIMEOUT',
+  ]);
+
+export function isRetryableExecutionCode(code: ExecutionErrorCode): boolean {
+  return RETRYABLE_EXECUTION_ERROR_CODES.has(code);
+}
 
 export type ExecutionStage =
   | 'agent_lookup'

@@ -215,6 +215,7 @@ export function RunDetailClient({ runId }: { runId: string }) {
               startedAt: payload.startedAt,
               completedAt: payload.completedAt,
               duration: payload.duration,
+              attemptDuration: payload.attemptDuration,
               result: payload.result,
               errorMessage: payload.errorMessage,
               cancelRequestedAt: payload.cancelRequestedAt,
@@ -377,8 +378,15 @@ export function RunDetailClient({ runId }: { runId: string }) {
           </div>
         </Card>
         <Card className="p-5">
-          <p className="text-sm text-slate-500">Duration</p>
+          <p className="text-sm text-slate-500">
+            {(run.attempt ?? 1) > 1 ? 'Total run duration' : 'Duration'}
+          </p>
           <p className="mt-2 text-xl font-semibold">{run.duration ?? '—'} ms</p>
+          {(run.attempt ?? 1) > 1 && run.attemptDuration != null && (
+            <p className="mt-1 text-xs text-slate-500">
+              Final attempt: {run.attemptDuration ?? '—'} ms
+            </p>
+          )}
         </Card>
         <Card className="p-5">
           <p className="text-sm text-slate-500">Steps</p>

@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { jsonError, requireAuthenticatedUser } from '@/lib/api/route-helpers';
 import { prisma } from '@/lib/db/prisma';
 import { sanitizePersistedExecutionError } from '@/lib/execution/errors';
+import { presentRunDuration } from '@/lib/runs/duration';
 
 export async function GET(request: NextRequest) {
   const user = await requireAuthenticatedUser();
@@ -35,19 +36,23 @@ export async function GET(request: NextRequest) {
   });
 
   return NextResponse.json({
-    data: runs.map((run) => ({
-      id: run.id,
-      agentId: run.agentId,
-      status: run.status,
-      startedAt: run.startedAt,
-      completedAt: run.completedAt,
-      duration: run.duration,
-      result: run.result,
-      errorMessage: sanitizePersistedExecutionError(run.errorMessage),
-      queuedAt: run.queuedAt,
-      attempt: run.attempt,
-      createdAt: run.createdAt,
-      agent: run.agent,
-    })),
+    data: runs.map((run) => {
+      const duration = presentRunDuration(run);
+      return {
+        id: run.id,
+        agentId: run.agentId,
+        status: run.status,
+        startedAt: duration.startedAt,
+        completedAt: run.completedAt,
+        duration: duration.duration,
+        attemptDuration: duration.attemptDuration,
+        result: run.result,
+        errorMessage: sanitizePersistedExecutionError(run.errorMessage),
+        queuedAt: run.queuedAt,
+        attempt: run.attempt,
+        createdAt: run.createdAt,
+        agent: run.agent,
+      };
+    }),
   });
 }

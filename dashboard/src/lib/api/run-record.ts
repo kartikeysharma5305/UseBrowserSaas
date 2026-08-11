@@ -16,6 +16,7 @@ import type {
   RunRecord,
 } from '@/lib/types';
 import { publicSnapshot } from '@/lib/variables/resolver';
+import { presentRunDuration } from '@/lib/runs/duration';
 
 export type RunApiSource = Run & {
   agent: Agent;
@@ -76,14 +77,16 @@ export function toRunApiRecord(
       : {};
   const configuration = snapshotConfiguration ?? legacyAgentConfiguration;
   const includeTimeline = options.includeTimeline ?? true;
+  const duration = presentRunDuration(run);
 
   return {
     id: run.id,
     agentId: run.agentId,
     status: run.status,
-    startedAt: run.startedAt.toISOString(),
+    startedAt: duration.startedAt.toISOString(),
     completedAt: run.completedAt?.toISOString() ?? null,
-    duration: run.duration,
+    duration: duration.duration,
+    attemptDuration: duration.attemptDuration,
     result: toClientJsonValue(run.result),
     errorMessage: sanitizePersistedExecutionError(run.errorMessage),
     queuedAt: run.queuedAt?.toISOString() ?? null,

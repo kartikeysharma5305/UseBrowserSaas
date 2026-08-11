@@ -10,6 +10,15 @@ export type AddressResolver = (
 export const systemAddressResolver: AddressResolver = async (hostname) =>
   lookup(hostname, { all: true, verbatim: true });
 
+export class NetworkResolutionError extends Error {
+  readonly code = 'NETWORK_RESOLUTION_FAILED' as const;
+
+  constructor() {
+    super('The destination hostname could not be resolved.');
+    this.name = 'NetworkResolutionError';
+  }
+}
+
 function ipv4Number(address: string) {
   const parts = address.split('.').map(Number);
   if (
@@ -81,11 +90,9 @@ export async function assertPublicResolution(
   try {
     addresses = await resolver(hostname);
   } catch {
-    throw new SafetyPolicyError('PRIVATE_NETWORK_BLOCKED');
+    throw new NetworkResolutionError();
   }
-  if (
-    !addresses.length ||
-    addresses.some(({ address }) => isUnsafeNetworkAddress(address))
-  )
+  if (!addresses.length) throw new NetworkResolutionError();
+  if (addresses.some(({ address }) => isUnsafeNetworkAddress(address)))
     throw new SafetyPolicyError('PRIVATE_NETWORK_BLOCKED');
 }

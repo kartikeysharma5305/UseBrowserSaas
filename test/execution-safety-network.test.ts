@@ -15,6 +15,21 @@ describe('execution safety network policy', () => {
     (address) => expect(isUnsafeNetworkAddress(address)).toBe(false)
   );
 
+  it.each(['www.wikipedia.org', 'en.wikipedia.org', 'www.amazon.in'])(
+    'allows public hostname %s when every answer is public',
+    async (hostname) => expect(assertPublicResolution(hostname, async () => [
+      { address: '13.225.95.181', family: 4 },
+      { address: '2600:9000:219a:2a00:8:b109:e16:e01', family: 6 },
+    ])).resolves.toBeUndefined()
+  );
+
+  it.each([
+    ['::ffff:127.0.0.1', true],
+    ['::ffff:13.225.95.181', false],
+  ] as const)('classifies IPv4-mapped IPv6 address %s', (address, unsafe) => {
+    expect(isUnsafeNetworkAddress(address)).toBe(unsafe);
+  });
+
   it('allows a hostname only when every DNS answer is public', async () => {
     await expect(assertPublicResolution('example.com', async () => [{ address: '93.184.216.34', family: 4 }])).resolves.toBeUndefined();
     await expect(assertPublicResolution('example.com', async () => [
@@ -28,8 +43,8 @@ describe('execution safety network policy', () => {
     async (hostname) => expect(assertPublicResolution(hostname, async () => [{ address: hostname, family: 4 }])).rejects.toMatchObject({ code: 'PRIVATE_NETWORK_BLOCKED' })
   );
 
-  it('fails closed on DNS failure or an empty response', async () => {
-    await expect(assertPublicResolution('example.com', async () => { throw new Error('dns'); })).rejects.toMatchObject({ code: 'PRIVATE_NETWORK_BLOCKED' });
-    await expect(assertPublicResolution('example.com', async () => [])).rejects.toMatchObject({ code: 'PRIVATE_NETWORK_BLOCKED' });
+  it('distinguishes transient DNS failure or an empty response from an unsafe answer', async () => {
+    await expect(assertPublicResolution('example.com', async () => { throw new Error('dns'); })).rejects.toMatchObject({ code: 'NETWORK_RESOLUTION_FAILED' });
+    await expect(assertPublicResolution('example.com', async () => [])).rejects.toMatchObject({ code: 'NETWORK_RESOLUTION_FAILED' });
   });
 });
