@@ -1,7 +1,7 @@
 import { toNextJsHandler } from 'better-auth/next-js';
 import { z } from 'zod';
 
-import { auth } from '@/lib/auth';
+import { getAuth } from '@/lib/auth';
 import { BETA_CONFIG, normalizeBetaEmail } from '@/lib/beta/config';
 import {
   acceptBetaInvite,
@@ -21,8 +21,6 @@ const inputSchema = z
     legalAccepted: z.literal(true),
   })
   .strict();
-
-const authHandlers = toNextJsHandler(auth);
 
 export async function POST(request: Request) {
   if (!BETA_CONFIG.enabled)
@@ -70,7 +68,7 @@ export async function POST(request: Request) {
       }),
     }
   );
-  const response = await authHandlers.POST(authRequest);
+  const response = await toNextJsHandler(getAuth()).POST(authRequest);
   if (!response.ok) {
     await releaseBetaInvite(invite.id);
     return response;

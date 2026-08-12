@@ -44,43 +44,53 @@ function parseAuthOrigin(variableName: string, value: string | undefined) {
   return url.origin;
 }
 
-const authSecret = process.env.BETTER_AUTH_SECRET;
+function createAuth() {
+  const authSecret = process.env.BETTER_AUTH_SECRET;
+  if (!authSecret?.trim()) {
+    throw new Error(
+      'BETTER_AUTH_SECRET is required. Set it in your dashboard .env.local file.'
+    );
+  }
 
-if (!authSecret?.trim()) {
-  throw new Error(
-    'BETTER_AUTH_SECRET is required. Set it in your dashboard .env.local file.'
+  const authBaseOrigin = parseAuthOrigin(
+    'BETTER_AUTH_URL',
+    process.env.BETTER_AUTH_URL
   );
+  const configuredTrustedOrigins = (
+    process.env.BETTER_AUTH_TRUSTED_ORIGINS ?? ''
+  )
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean)
+    .map((origin) => parseAuthOrigin('BETTER_AUTH_TRUSTED_ORIGINS', origin));
+  const trustedOrigins = [
+    ...new Set([authBaseOrigin, ...configuredTrustedOrigins]),
+  ];
+
+  return betterAuth({
+    baseURL: authBaseOrigin,
+    trustedOrigins,
+    secret: authSecret,
+    advanced: getAuthCookiePolicy(process.env.NODE_ENV === 'production'),
+    database: prismaAdapter(prisma, {
+      provider: 'postgresql',
+    }),
+    emailAndPassword: {
+      enabled: true,
+      autoSignIn: true,
+      requireEmailVerification: false,
+    },
+    session: {
+      expiresIn: 60 * 60 * 24 * 7,
+      updateAge: 60 * 60 * 24,
+    },
+    plugins: [nextCookies()],
+  });
 }
 
-const authBaseOrigin = parseAuthOrigin(
-  'BETTER_AUTH_URL',
-  process.env.BETTER_AUTH_URL
-);
-const configuredTrustedOrigins = (process.env.BETTER_AUTH_TRUSTED_ORIGINS ?? '')
-  .split(',')
-  .map((origin) => origin.trim())
-  .filter(Boolean)
-  .map((origin) => parseAuthOrigin('BETTER_AUTH_TRUSTED_ORIGINS', origin));
-const trustedOrigins = [
-  ...new Set([authBaseOrigin, ...configuredTrustedOrigins]),
-];
+let authInstance: ReturnType<typeof createAuth> | undefined;
 
-export const auth = betterAuth({
-  baseURL: authBaseOrigin,
-  trustedOrigins,
-  secret: authSecret,
-  advanced: getAuthCookiePolicy(process.env.NODE_ENV === 'production'),
-  database: prismaAdapter(prisma, {
-    provider: 'postgresql',
-  }),
-  emailAndPassword: {
-    enabled: true,
-    autoSignIn: true,
-    requireEmailVerification: false,
-  },
-  session: {
-    expiresIn: 60 * 60 * 24 * 7,
-    updateAge: 60 * 60 * 24,
-  },
-  plugins: [nextCookies()],
-});
+export function getAuth() {
+  authInstance ??= createAuth();
+  return authInstance;
+}

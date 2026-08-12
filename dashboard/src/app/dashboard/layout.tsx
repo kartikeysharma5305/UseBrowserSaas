@@ -5,6 +5,8 @@ import { getCurrentUser } from '@/lib/auth/helpers';
 import { prisma } from '@/lib/db/prisma';
 import { BETA_CONFIG } from '@/lib/beta/config';
 
+export const dynamic = 'force-dynamic';
+
 export default async function DashboardLayout({
   children,
 }: {
