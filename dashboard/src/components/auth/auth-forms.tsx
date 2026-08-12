@@ -206,7 +206,7 @@ export function RegisterForm({
           body: JSON.stringify(
             betaMode
               ? { name, email, password, inviteToken, legalAccepted: true }
-              : { name, email, password }
+              : { name, email, password, legalAccepted: true }
           ),
         }
       );
@@ -217,20 +217,6 @@ export function RegisterForm({
         } | null;
         throw new Error(payload?.message ?? 'Unable to create account.');
       }
-
-      const acceptance = betaMode
-        ? null
-        : await fetch('/api/legal/acceptance', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              documents: ['TERMS', 'PRIVACY', 'ACCEPTABLE_USE'],
-            }),
-          });
-      if (acceptance && !acceptance.ok)
-        throw new Error(
-          'Account created, but legal acknowledgement was not recorded. Retry from Settings.'
-        );
 
       router.push('/dashboard');
       router.refresh();

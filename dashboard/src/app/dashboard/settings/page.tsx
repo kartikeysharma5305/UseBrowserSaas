@@ -4,6 +4,7 @@ import { OnboardingControls } from '@/components/dashboard/onboarding-controls';
 import { ApiKeyManagement } from '@/components/dashboard/api-key-management';
 import { WebhookManagement } from '@/components/dashboard/webhook-management';
 import { PrivacyDataCard } from '@/components/dashboard/privacy-data-card';
+import { LegalAcceptanceCard } from '@/components/dashboard/legal-acceptance-card';
 
 export default function SettingsPage() {
   return (
@@ -18,6 +19,7 @@ export default function SettingsPage() {
       </div>
 
       <NotificationPreferences />
+      <LegalAcceptanceCard />
       <PrivacyDataCard />
       <OnboardingControls />
       <ApiKeyManagement />
