@@ -4,7 +4,10 @@ import { z } from 'zod';
 
 import { ExecutionServiceError } from '../dashboard/src/lib/execution/errors.js';
 import { redactLogValue } from '../dashboard/src/lib/logger.js';
-import { middleware } from '../dashboard/src/middleware.js';
+import {
+  isTrustedMutationOrigin,
+  middleware,
+} from '../dashboard/src/middleware.js';
 import { buildSecurityHeaders } from '../dashboard/next.config.js';
 import {
   isExecutionAdmissionEnabled,
@@ -116,6 +119,58 @@ describe('Phase 20 platform security', () => {
       })
     );
     expect(bearer.status).toBe(200);
+  });
+
+  it('uses the canonical public origin behind Railway without trusting proxy headers', () => {
+    const publicOrigin = 'https://web-production-98829.up.railway.app';
+    const environment = {
+      NODE_ENV: 'production',
+      APP_BASE_URL: publicOrigin,
+    } as NodeJS.ProcessEnv;
+    const railwayRequest = new NextRequest('http://internal:3000/api/agents', {
+      method: 'POST',
+      headers: {
+        cookie: 'session=x',
+        origin: publicOrigin,
+        host: 'internal:3000',
+        'x-forwarded-host': 'web-production-98829.up.railway.app',
+        'x-forwarded-proto': 'https',
+        'sec-fetch-site': 'same-origin',
+      },
+    });
+    expect(isTrustedMutationOrigin(railwayRequest, environment)).toBe(true);
+
+    for (const origin of ['https://evil.example', 'http://localhost:3001']) {
+      const hostileRequest = new NextRequest(
+        'http://internal:3000/api/agents',
+        {
+          method: 'POST',
+          headers: {
+            cookie: 'session=x',
+            origin,
+            'x-forwarded-host': 'web-production-98829.up.railway.app',
+            'x-forwarded-proto': 'https',
+            'sec-fetch-site': 'same-origin',
+          },
+        }
+      );
+      expect(isTrustedMutationOrigin(hostileRequest, environment)).toBe(false);
+    }
+
+    const spoofedForwarding = new NextRequest(
+      'http://internal:3000/api/agents',
+      {
+        method: 'POST',
+        headers: {
+          cookie: 'session=x',
+          origin: 'https://evil.example',
+          'x-forwarded-host': 'web-production-98829.up.railway.app',
+          'x-forwarded-proto': 'https',
+          'sec-fetch-site': 'same-origin',
+        },
+      }
+    );
+    expect(isTrustedMutationOrigin(spoofedForwarding, environment)).toBe(false);
   });
 
   it('defines restrictive headers and production-only HSTS', () => {
