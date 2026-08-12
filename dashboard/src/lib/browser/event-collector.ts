@@ -26,6 +26,21 @@ interface TaskUpdateEventData {
   paused?: unknown;
 }
 
+export interface OperationEventData {
+  operation: string;
+  status: 'BEGIN' | 'END' | 'FAILED' | 'TIMED_OUT';
+  duration_ms?: number;
+}
+
+const OPERATION_MESSAGES: Record<string, string> = {
+  BROWSER_START: 'Launching browser',
+  NAVIGATION: 'Navigating to target',
+  PAGE_READY: 'Reading page content',
+  MODEL_REQUEST: 'Requesting AI action',
+  ACTION: 'Executing browser action',
+  SCREENSHOT: 'Capturing screenshot',
+};
+
 export type CollectedEventType =
   | 'STEP_STARTED'
   | 'STEP_COMPLETED'
@@ -137,6 +152,46 @@ export class EventCollector {
   async flush(): Promise<void> {
     await this.pendingPersistence;
     if (this.persistenceError) throw this.persistenceError;
+  }
+
+  recordOperation(rawEvent: OperationEventData): void {
+    const operation = OPERATION_MESSAGES[rawEvent.operation]
+      ? rawEvent.operation
+      : 'UNKNOWN';
+    const baseMessage = OPERATION_MESSAGES[operation] ?? 'Processing run';
+    const status = rawEvent.status;
+    const suffix =
+      status === 'END'
+        ? ' completed.'
+        : status === 'FAILED'
+          ? ' failed.'
+          : status === 'TIMED_OUT'
+            ? ' timed out.'
+            : '…';
+    const durationMs =
+      typeof rawEvent.duration_ms === 'number' &&
+      Number.isSafeInteger(rawEvent.duration_ms) &&
+      rawEvent.duration_ms >= 0
+        ? rawEvent.duration_ms
+        : undefined;
+
+    this.collect({
+      sequence: this.takeSequence(),
+      type: 'SYSTEM',
+      message: `${baseMessage}${suffix}`,
+      data: sanitizeEventData({
+        operation,
+        operationStatus: status,
+        durationMs,
+        success:
+          status === 'END'
+            ? true
+            : status === 'FAILED' || status === 'TIMED_OUT'
+              ? false
+              : undefined,
+      }),
+      timestamp: new Date(),
+    });
   }
 
   private collect(event: CollectedEvent): void {

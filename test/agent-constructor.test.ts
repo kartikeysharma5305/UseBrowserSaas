@@ -1930,7 +1930,7 @@ describe('Agent constructor browser session alignment', () => {
     await agent.close();
   });
 
-  it('runs initial_actions with default multi_act options (python c011 parity)', async () => {
+  it('runs initial_actions with bounded navigation options', async () => {
     const agent = new Agent({
       task: 'Execute provided initial actions',
       llm: createLlm(),
@@ -1957,7 +1957,13 @@ describe('Agent constructor browser session alignment', () => {
     await agent.run(1);
 
     expect(multiActSpy).toHaveBeenCalledTimes(1);
-    expect(multiActSpy.mock.calls[0]).toHaveLength(1);
+    expect(multiActSpy).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.objectContaining({
+        signal: expect.any(AbortSignal),
+        action_timeout: 45,
+      })
+    );
 
     logAgentEventSpy.mockRestore();
     await agent.close();

@@ -16,10 +16,13 @@ import {
   stopWorkerInstance,
   workerBuildVersion,
 } from '@/lib/worker/worker-health';
+import { installBrowserShutdownRejectionContainment } from '@/lib/worker/unhandled-browser-rejection';
 
 const configuration = getQueueConfiguration();
 const workerId = createWorkerInstanceId();
 const shutdownController = new AbortController();
+const removeBrowserShutdownRejectionContainment =
+  installBrowserShutdownRejectionContainment();
 let draining = false;
 
 // The root engine's info stream includes task/model output; worker logs use the
@@ -142,6 +145,7 @@ async function shutdown(signal: string) {
     });
   }
   clearInterval(healthHeartbeat);
+  removeBrowserShutdownRejectionContainment();
   await cancellationSubscriber.close();
   await stopWorkerInstance(workerId);
   await prisma.$disconnect();

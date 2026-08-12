@@ -28,6 +28,7 @@ const originalEnvironment = {
 };
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   resetOperationsMetricsForTests();
   for (const [name, value] of Object.entries(originalEnvironment)) {
@@ -193,6 +194,65 @@ describe('Phase 27C NVIDIA NIM provider', () => {
     expect(providerFailureCode(new Error('malformed JSON response'))).toBe(
       'PROVIDER_BAD_RESPONSE'
     );
+  });
+
+  it('propagates AbortSignal to the NVIDIA HTTP request', async () => {
+    let requestSignal: AbortSignal | null = null;
+    const model = new ChatNvidia({
+      model: 'nvidia/nemotron-3-ultra-550b-a55b',
+      apiKey: 'nvapi-test-only',
+      maxRetries: 0,
+      fetchImplementation: vi.fn(async (input, init) => {
+        const request = new Request(input, init);
+        requestSignal = request.signal;
+        return await new Promise<Response>((_resolve, reject) => {
+          request.signal.addEventListener(
+            'abort',
+            () => reject(new DOMException('aborted', 'AbortError')),
+            { once: true }
+          );
+        });
+      }),
+    });
+    const controller = new AbortController();
+    const invocation = model.ainvoke([new UserMessage('test')], undefined, {
+      signal: controller.signal,
+    });
+
+    await vi.waitFor(() => expect(requestSignal).not.toBeNull());
+    controller.abort();
+    await expect(invocation).rejects.toMatchObject({ name: 'ModelProviderError' });
+    expect(requestSignal?.aborted).toBe(true);
+  });
+
+  it('bounds a stalled NVIDIA HTTP request with the provider timeout', async () => {
+    vi.useFakeTimers();
+    let requestSignal: AbortSignal | null = null;
+    const model = new ChatNvidia({
+      model: 'nvidia/nemotron-3-ultra-550b-a55b',
+      apiKey: 'nvapi-test-only',
+      timeout: 1_000,
+      maxRetries: 0,
+      fetchImplementation: vi.fn(async (input, init) => {
+        const request = new Request(input, init);
+        requestSignal = request.signal;
+        return await new Promise<Response>((_resolve, reject) => {
+          request.signal.addEventListener(
+            'abort',
+            () => reject(new DOMException('aborted', 'AbortError')),
+            { once: true }
+          );
+        });
+      }),
+    });
+
+    const invocation = model.ainvoke([new UserMessage('test')]);
+    const rejection = expect(invocation).rejects.toMatchObject({
+      name: 'ModelProviderError',
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    await rejection;
+    expect(requestSignal?.aborted).toBe(true);
   });
 
   it('redacts NVIDIA credentials and serves model data from the Run snapshot', () => {

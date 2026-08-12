@@ -12,6 +12,9 @@ export interface RunEventData {
   success?: boolean;
   error?: string;
   model?: string;
+  operation?: string;
+  operationStatus?: string;
+  durationMs?: number;
   stopped?: boolean;
   paused?: boolean;
   artifactIds?: string[];
@@ -113,6 +116,8 @@ export function sanitizeEventData(value: unknown): RunEventData {
   const actionSummary = truncateEventText(value.actionSummary, 300);
   const error = truncateEventText(value.error, EVENT_TEXT_LIMIT);
   const model = truncateEventText(value.model, 120);
+  const operation = truncateEventText(value.operation, 40);
+  const operationStatus = truncateEventText(value.operationStatus, 20);
   const url = normalizeEventUrl(value.url);
 
   if (actionType) output.actionType = actionType;
@@ -121,6 +126,15 @@ export function sanitizeEventData(value: unknown): RunEventData {
   if (typeof value.success === 'boolean') output.success = value.success;
   if (error) output.error = error;
   if (model) output.model = model;
+  if (operation) output.operation = operation;
+  if (operationStatus) output.operationStatus = operationStatus;
+  if (
+    typeof value.durationMs === 'number' &&
+    Number.isSafeInteger(value.durationMs) &&
+    value.durationMs >= 0
+  ) {
+    output.durationMs = value.durationMs;
+  }
   if (typeof value.stopped === 'boolean') output.stopped = value.stopped;
   if (typeof value.paused === 'boolean') output.paused = value.paused;
 

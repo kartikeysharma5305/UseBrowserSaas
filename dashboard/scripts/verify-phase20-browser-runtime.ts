@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { chromium } from 'playwright';
 
 import { prisma } from '../src/lib/db/prisma';
+import { registerRuntimeUser } from './runtime-beta-registration';
 
 const baseUrl = process.env.PHASE20_BASE_URL ?? 'http://localhost:3001';
 const marker = randomUUID().replaceAll('-', '');
@@ -10,11 +11,12 @@ const password = `Phase20-${marker}!aA1`;
 
 async function main() {
   const browser = await chromium.launch({ headless: true });
-  const page = await browser.newPage();
+  const context = await browser.newContext();
+  const page = await context.newPage();
   let signInPost = false;
   let sensitiveUrl = false;
   let loginSubmitted = false;
-  page.on('request', (request) => {
+  context.on('request', (request) => {
     const url = request.url();
     if (request.method() === 'POST' && url.endsWith('/api/auth/sign-in/email'))
       signInPost = true;
@@ -33,33 +35,36 @@ async function main() {
       throw new Error(
         'Development CSP does not allow required hydration support.'
       );
-    await page.getByLabel('Full name').fill('Phase 20 browser disposable');
-    await page.getByLabel('Email').fill(email);
-    await page.getByLabel('Password').fill(password);
-    await page.getByRole('button', { name: 'Create account' }).click();
-    await page.waitForURL('**/dashboard');
+    await page.close();
+    const registeredPage = await registerRuntimeUser({
+      context,
+      origin: baseUrl,
+      email,
+      name: 'Phase 20 browser disposable',
+      password,
+    });
 
-    await page.context().clearCookies();
-    await page.goto(
+    await registeredPage.context().clearCookies();
+    await registeredPage.goto(
       `${baseUrl}/login?email=${encodeURIComponent(email)}&password=${encodeURIComponent(password)}`
     );
-    await page.waitForFunction(
+    await registeredPage.waitForFunction(
       () =>
         !location.search.includes('email=') &&
         !location.search.includes('password=')
     );
-    await page.getByLabel('Email').fill(email);
-    await page.getByLabel('Password').fill(password);
+    await registeredPage.getByLabel('Email').fill(email);
+    await registeredPage.getByLabel('Password').fill(password);
     loginSubmitted = true;
-    await page.getByRole('button', { name: 'Sign in' }).click();
-    await page.waitForURL('**/dashboard');
-    const protectedStatus = await page.evaluate(
+    await registeredPage.getByRole('button', { name: 'Sign in' }).click();
+    await registeredPage.waitForURL('**/dashboard');
+    const protectedStatus = await registeredPage.evaluate(
       async () => (await fetch('/api/agents')).status
     );
     if (!signInPost || sensitiveUrl || protectedStatus !== 200)
       throw new Error('Browser authentication contract failed.');
 
-    const deleted = await page.evaluate(
+    const deleted = await registeredPage.evaluate(
       async () =>
         (
           await fetch('/api/account/delete', {

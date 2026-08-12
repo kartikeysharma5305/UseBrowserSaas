@@ -216,6 +216,43 @@ class ExecutionTimeoutError extends Error {
   }
 }
 
+class AgentOperationTimeoutError extends Error {
+  readonly code: string;
+
+  constructor(
+    readonly operation: AgentOperation,
+    readonly timeoutSeconds: number,
+    options?: ErrorOptions
+  ) {
+    const code =
+      operation === 'ACTION'
+        ? 'BROWSER_ACTION_TIMEOUT'
+        : operation === 'MODEL_REQUEST'
+          ? 'PROVIDER_TIMEOUT'
+          : `${operation}_TIMEOUT`;
+    super(
+      `${code}: ${operation.toLowerCase().replaceAll('_', ' ')} exceeded its ${Number(timeoutSeconds.toFixed(3))} second limit`,
+      options
+    );
+    this.name = 'AgentOperationTimeoutError';
+    this.code = code;
+  }
+}
+
+type AgentOperation =
+  | 'BROWSER_START'
+  | 'NAVIGATION'
+  | 'PAGE_READY'
+  | 'MODEL_REQUEST'
+  | 'ACTION'
+  | 'SCREENSHOT';
+
+interface AgentOperationEvent {
+  operation: AgentOperation;
+  status: 'BEGIN' | 'END' | 'FAILED' | 'TIMED_OUT';
+  duration_ms?: number;
+}
+
 interface RerunHistoryOptions {
   max_retries?: number;
   skip_failures?: boolean;
@@ -303,6 +340,15 @@ interface AgentConstructorParams<Context, AgentStructuredOutput> {
   session_attachment_mode?: AgentSettings['session_attachment_mode'];
   llm_timeout?: number | null;
   step_timeout?: number;
+  browser_start_timeout?: number;
+  navigation_timeout?: number;
+  page_ready_timeout?: number;
+  action_timeout?: number;
+  screenshot_timeout?: number;
+  run_deadline_ms?: number | null;
+  operation_observer?:
+    | ((event: AgentOperationEvent) => void | Promise<void>)
+    | null;
   final_response_after_failure?: boolean;
   message_compaction?: MessageCompactionSettings | boolean | null;
   loop_detection_window?: number;
@@ -398,6 +444,15 @@ const defaultAgentOptions = () => ({
   vision_detail_level: 'auto' as const,
   llm_timeout: null as number | null,
   step_timeout: 180,
+  browser_start_timeout: 30,
+  navigation_timeout: 45,
+  page_ready_timeout: 45,
+  action_timeout: 45,
+  screenshot_timeout: 15,
+  run_deadline_ms: null as number | null,
+  operation_observer: null as
+    | ((event: AgentOperationEvent) => void | Promise<void>)
+    | null,
   final_response_after_failure: true,
   message_compaction: true as MessageCompactionSettings | boolean,
   loop_detection_window: 20,
@@ -679,6 +734,10 @@ export class Agent<
   screenshot_service: ScreenshotService | null = null;
   agent_directory: string;
   private _current_screenshot_path: string | null = null;
+  private _run_deadline_ms: number | null = null;
+  private _operation_observer:
+    | ((event: AgentOperationEvent) => void | Promise<void>)
+    | null = null;
   has_downloads_path = false;
   private _last_known_downloads: string[] = [];
   version = 'unknown';
@@ -791,6 +850,13 @@ export class Agent<
       session_attachment_mode = 'copy',
       llm_timeout = null,
       step_timeout = 180,
+      browser_start_timeout = 30,
+      navigation_timeout = 45,
+      page_ready_timeout = 45,
+      action_timeout = 45,
+      screenshot_timeout = 15,
+      run_deadline_ms = null,
+      operation_observer = null,
       final_response_after_failure = true,
       message_compaction = true,
       loop_detection_window = 20,
@@ -848,6 +914,36 @@ export class Agent<
       'step_timeout',
       step_timeout,
       0,
+      MAX_AGENT_TIMEOUT_SECONDS
+    );
+    const validatedBrowserStartTimeout = requireBoundedNumber(
+      'browser_start_timeout',
+      browser_start_timeout,
+      0.001,
+      MAX_AGENT_TIMEOUT_SECONDS
+    );
+    const validatedNavigationTimeout = requireBoundedNumber(
+      'navigation_timeout',
+      navigation_timeout,
+      0.001,
+      MAX_AGENT_TIMEOUT_SECONDS
+    );
+    const validatedPageReadyTimeout = requireBoundedNumber(
+      'page_ready_timeout',
+      page_ready_timeout,
+      0.001,
+      MAX_AGENT_TIMEOUT_SECONDS
+    );
+    const validatedActionTimeout = requireBoundedNumber(
+      'action_timeout',
+      action_timeout,
+      0.001,
+      MAX_AGENT_TIMEOUT_SECONDS
+    );
+    const validatedScreenshotTimeout = requireBoundedNumber(
+      'screenshot_timeout',
+      screenshot_timeout,
+      0.001,
       MAX_AGENT_TIMEOUT_SECONDS
     );
     const validatedLoopDetectionWindow = requireBoundedInteger(
@@ -961,6 +1057,11 @@ export class Agent<
       this.output_model_schema
     );
     this.sensitive_data = sensitive_data;
+    this._run_deadline_ms =
+      typeof run_deadline_ms === 'number' && Number.isFinite(run_deadline_ms)
+        ? run_deadline_ms
+        : null;
+    this._operation_observer = operation_observer;
     this.controller = resolvedController;
     const setCoordinateClicking = (this.controller as any)
       ?.set_coordinate_clicking;
@@ -1063,6 +1164,11 @@ export class Agent<
       session_attachment_mode,
       llm_timeout: validatedLlmTimeout,
       step_timeout: validatedStepTimeout,
+      browser_start_timeout: validatedBrowserStartTimeout,
+      navigation_timeout: validatedNavigationTimeout,
+      page_ready_timeout: validatedPageReadyTimeout,
+      action_timeout: validatedActionTimeout,
+      screenshot_timeout: validatedScreenshotTimeout,
       final_response_after_failure,
       message_compaction: normalizedMessageCompaction,
       loop_detection_window: validatedLoopDetectionWindow,
@@ -2587,7 +2693,9 @@ export class Agent<
     }
   }
 
-  private async _execute_initial_actions() {
+  private async _execute_initial_actions(
+    signal: AbortSignal | null = null
+  ) {
     if (!this.initial_actions?.length || this.state.follow_up_task) {
       return;
     }
@@ -2595,7 +2703,15 @@ export class Agent<
     this.logger.debug(
       `⚡ Executing ${this.initial_actions.length} initial actions...`
     );
-    const result = await this.multi_act(this.initial_actions);
+    const result = await this.multi_act(this.initial_actions, {
+      signal,
+      action_timeout: this._operationTimeoutSeconds(
+        Math.min(
+          this.settings.action_timeout,
+          this.settings.navigation_timeout
+        )
+      ),
+    });
 
     if (result.length > 0 && this.initial_url && result[0]?.long_term_memory) {
       result[0].long_term_memory = `Found initial url and automatically loaded it. ${result[0].long_term_memory}`;
@@ -2690,11 +2806,22 @@ export class Agent<
       this.eventbus.dispatch(CreateAgentTaskEvent.fromAgent(this as any));
 
       if (!this.state.stopped) {
-        await this.browser_session?.start();
+        await this._runObservedOperation(
+          'BROWSER_START',
+          this.settings.browser_start_timeout,
+          (operationSignal) => this.browser_session!.start(operationSignal)
+        );
       }
       await this._register_skills_as_actions();
       try {
-        await this._execute_initial_actions();
+        if (this.initial_actions?.length) {
+          await this._runObservedOperation(
+            'NAVIGATION',
+            this.settings.navigation_timeout,
+            (operationSignal) =>
+              this._execute_initial_actions(operationSignal)
+          );
+        }
       } catch (error) {
         if ((error as Error)?.name !== 'InterruptedError') {
           throw error;
@@ -2935,6 +3062,66 @@ export class Agent<
     }
   }
 
+  private async _emitOperationEvent(event: AgentOperationEvent) {
+    try {
+      await this._operation_observer?.(event);
+    } catch (error) {
+      this.logger.debug(
+        `Operation observer failed: ${this._redactSensitiveText(error instanceof Error ? error.message : String(error))}`
+      );
+    }
+  }
+
+  private _operationTimeoutSeconds(configuredSeconds: number) {
+    if (this._run_deadline_ms === null) return configuredSeconds;
+    const remainingSeconds = (this._run_deadline_ms - Date.now()) / 1000;
+    if (remainingSeconds <= 0) return 0.001;
+    return Math.max(0.001, Math.min(configuredSeconds, remainingSeconds));
+  }
+
+  private async _runObservedOperation<T>(
+    operation: AgentOperation,
+    configuredTimeoutSeconds: number,
+    execute: (signal: AbortSignal) => Promise<T>,
+    parentSignal: AbortSignal | null = null
+  ): Promise<T> {
+    const startedAt = Date.now();
+    const timeoutSeconds = this._operationTimeoutSeconds(
+      configuredTimeoutSeconds
+    );
+    const controller = new AbortController();
+    const removeAbortRelay = this._relayAbortSignal(parentSignal, controller);
+    await this._emitOperationEvent({ operation, status: 'BEGIN' });
+    try {
+      const result = await this._executeWithTimeout(
+        execute(controller.signal),
+        timeoutSeconds,
+        () => controller.abort()
+      );
+      await this._emitOperationEvent({
+        operation,
+        status: 'END',
+        duration_ms: Date.now() - startedAt,
+      });
+      return result;
+    } catch (error) {
+      const timedOut = error instanceof ExecutionTimeoutError;
+      await this._emitOperationEvent({
+        operation,
+        status: timedOut ? 'TIMED_OUT' : 'FAILED',
+        duration_ms: Date.now() - startedAt,
+      });
+      if (timedOut) {
+        throw new AgentOperationTimeoutError(operation, timeoutSeconds, {
+          cause: error,
+        });
+      }
+      throw error;
+    } finally {
+      removeAbortRelay();
+    }
+  }
+
   async _step(
     step_info: AgentStepInfo | null = null,
     signal: AbortSignal | null = null
@@ -2949,7 +3136,12 @@ export class Agent<
         this._throwIfAborted(signal);
         await this._get_next_action(browser_state_summary, signal);
         this._throwIfAborted(signal);
-        await this._execute_actions(signal);
+        await this._runObservedOperation(
+          'ACTION',
+          this.settings.action_timeout,
+          (operationSignal) => this._execute_actions(operationSignal),
+          signal
+        );
         await this._post_process();
       } catch (error) {
         if (signal?.aborted) {
@@ -2987,12 +3179,33 @@ export class Agent<
       `🌐 Step ${this.state.n_steps}: Getting browser state...`
     );
     const browser_state_summary: BrowserStateSummary =
-      await this.browser_session.get_browser_state_with_recovery?.({
-        cache_clickable_elements_hashes: true,
-        include_screenshot: true,
-        include_recent_events: this.settings.include_recent_events,
-        signal,
-      });
+      await this._runObservedOperation(
+        'PAGE_READY',
+        this.settings.page_ready_timeout,
+        (operationSignal) =>
+          this.browser_session!.get_browser_state_with_recovery?.({
+            cache_clickable_elements_hashes: true,
+            include_screenshot: false,
+            include_recent_events: this.settings.include_recent_events,
+            signal: operationSignal,
+          }) as Promise<BrowserStateSummary>,
+        signal
+      );
+    try {
+      browser_state_summary.screenshot = await this._runObservedOperation(
+        'SCREENSHOT',
+        this.settings.screenshot_timeout,
+        (operationSignal) =>
+          this.browser_session!.take_screenshot(false, null, operationSignal),
+        signal
+      );
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      browser_state_summary.screenshot = null;
+      this.logger.warning(
+        `Screenshot capture skipped: ${this._redactSensitiveText(error instanceof Error ? error.message : String(error))}`
+      );
+    }
     this._throwIfAborted(signal);
     const current_page = await this.browser_session.get_current_page?.();
 
@@ -3113,22 +3326,13 @@ export class Agent<
     const llmAbortController = new AbortController();
     const removeAbortRelay = this._relayAbortSignal(signal, llmAbortController);
     try {
-      model_output = await this._executeWithTimeout(
-        this._get_model_output_with_retry(
-          input_messages,
-          llmAbortController.signal
-        ),
+      model_output = await this._runObservedOperation(
+        'MODEL_REQUEST',
         this.settings.llm_timeout,
-        () => llmAbortController.abort()
+        (operationSignal) =>
+          this._get_model_output_with_retry(input_messages, operationSignal),
+        llmAbortController.signal
       );
-    } catch (error) {
-      if (error instanceof ExecutionTimeoutError) {
-        throw new Error(
-          `LLM call timed out after ${this.settings.llm_timeout} seconds. Keep your thinking and output short.`,
-          { cause: error }
-        );
-      }
-      throw error;
     } finally {
       removeAbortRelay();
     }
@@ -3159,7 +3363,12 @@ export class Agent<
     );
     const result = await this.multi_act(
       this.state.last_model_output.action.map((a) => a.model_dump()),
-      { signal }
+      {
+        signal,
+        action_timeout: this._operationTimeoutSeconds(
+          this.settings.action_timeout
+        ),
+      }
     );
     this.logger.debug(`✅ Step ${this.state.n_steps}: Actions completed`);
     this.state.last_result = result;

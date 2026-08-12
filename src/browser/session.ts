@@ -2568,7 +2568,8 @@ export class BrowserSession {
     return this._logger;
   }
 
-  async start() {
+  async start(signal: AbortSignal | null = null) {
+    this._throwIfAborted(signal);
     this.attach_default_watchdogs();
     this._intentionalStop = false;
 
@@ -2576,10 +2577,13 @@ export class BrowserSession {
       return this;
     }
 
-    await this.event_bus.dispatch(
-      new BrowserStartEvent({
-        cdp_url: this.cdp_url,
-      })
+    await this._withAbort(
+      this.event_bus.dispatch(
+        new BrowserStartEvent({
+          cdp_url: this.cdp_url,
+        })
+      ),
+      signal
     );
 
     const ensurePage = async () => {
@@ -2602,7 +2606,10 @@ export class BrowserSession {
       }
 
       if (typeof this.browser_context?.newPage === 'function') {
-        const created = await this.browser_context.newPage();
+        const created = await this._withAbort(
+          this.browser_context.newPage(),
+          signal
+        );
         this._setActivePage(created ?? null);
         return;
       }
@@ -2613,14 +2620,21 @@ export class BrowserSession {
     if (!this.browser_context) {
       if (!this.browser) {
         const playwright =
-          (this.playwright as any) ?? (await async_playwright());
+          (this.playwright as any) ??
+          (await this._withAbort(async_playwright(), signal));
         this.playwright = playwright;
 
         if (this.cdp_url) {
-          this.browser = await this._connectToConfiguredBrowser(playwright);
+          this.browser = await this._withAbort(
+            this._connectToConfiguredBrowser(playwright),
+            signal
+          );
           this.ownsBrowserResources = false;
         } else if (this.wss_url) {
-          this.browser = await this._connectToConfiguredBrowser(playwright);
+          this.browser = await this._withAbort(
+            this._connectToConfiguredBrowser(playwright),
+            signal
+          );
           this.ownsBrowserResources = false;
         } else {
           const launchOptions = this._toPlaywrightOptions(
@@ -2633,19 +2647,31 @@ export class BrowserSession {
               )
             : [];
           this._browserLaunchToken = browserLaunchToken;
+          const launchPromise = this._launchChromiumWithSandboxFallback(
+            playwright,
+            {
+              ...(launchOptions ?? {}),
+              args: [
+                ...rawLaunchArgs,
+                `--browser-use-session-token=${browserLaunchToken}`,
+              ],
+            }
+          );
           try {
-            this.browser = await this._launchChromiumWithSandboxFallback(
-              playwright,
-              {
-                ...(launchOptions ?? {}),
-                args: [
-                  ...rawLaunchArgs,
-                  `--browser-use-session-token=${browserLaunchToken}`,
-                ],
-              }
-            );
+            this.browser = await this._withAbort(launchPromise, signal);
           } catch (error) {
             this._browserLaunchToken = null;
+            if (signal?.aborted) {
+              void launchPromise
+                .then(async (lateBrowser) => {
+                  try {
+                    await lateBrowser?.close?.();
+                  } catch {
+                    // A timed-out late browser launch is best-effort cleanup.
+                  }
+                })
+                .catch(() => undefined);
+            }
             throw error;
           }
           this.ownsBrowserResources = true;
@@ -2669,13 +2695,14 @@ export class BrowserSession {
       if (existingContexts.length > 0) {
         this.browser_context = existingContexts[0] ?? null;
       } else {
-        this.browser_context = await this._ensureBrowserContextFromBrowser(
-          this.browser
+        this.browser_context = await this._withAbort(
+          this._ensureBrowserContextFromBrowser(this.browser),
+          signal
         );
       }
     }
 
-    await this._applyConfiguredExtraHttpHeaders();
+    await this._withAbort(this._applyConfiguredExtraHttpHeaders(), signal);
     await ensurePage();
     if (
       !this.human_current_page ||
@@ -2684,7 +2711,7 @@ export class BrowserSession {
       this.human_current_page = this.agent_current_page;
     }
 
-    const activePage = await this.get_current_page();
+    const activePage = await this._withAbort(this.get_current_page(), signal);
     if (activePage) {
       await this._assert_page_url_allowed_or_rollback(activePage);
       await this._syncCurrentTabFromPage(activePage);
@@ -2695,7 +2722,10 @@ export class BrowserSession {
       }
       if (typeof activePage.title === 'function') {
         try {
-          this.currentTitle = await readBoundedPageTitle(activePage);
+          this.currentTitle = await this._withAbort(
+            readBoundedPageTitle(activePage),
+            signal
+          );
         } catch {
           // Ignore title read errors from transient pages.
         }
@@ -2708,10 +2738,13 @@ export class BrowserSession {
       `Started ${this.describe()} with profile ${this.browser_profile.toString()}`
     );
     this._attachRemoteDisconnectHandler(this.browser);
-    await this.event_bus.dispatch(
-      new BrowserConnectedEvent({
-        cdp_url: this.cdp_url ?? this.wss_url ?? 'playwright',
-      })
+    await this._withAbort(
+      this.event_bus.dispatch(
+        new BrowserConnectedEvent({
+          cdp_url: this.cdp_url ?? this.wss_url ?? 'playwright',
+        })
+      ),
+      signal
     );
     return this;
   }
@@ -3002,7 +3035,7 @@ export class BrowserSession {
     this._throwIfAborted(signal);
 
     if (!this.initialized) {
-      await this._withAbort(this.start(), signal);
+      await this._withAbort(this.start(signal), signal);
     }
     const page = await this._withAbort(this.get_current_page(), signal);
     this._throwIfAborted(signal);
@@ -5885,13 +5918,15 @@ export class BrowserSession {
       y: number;
       width: number;
       height: number;
-    } | null = null
+    } | null = null,
+    signal: AbortSignal | null = null
   ): Promise<string | null> {
-    const page = await this.get_current_page();
+    this._throwIfAborted(signal);
+    const page = await this._withAbort(this.get_current_page(), signal);
     if (!page) {
       throw new Error('No page available for screenshot');
     }
-    await this.validate_page_after_action(page);
+    await this.validate_page_after_action(page, signal);
 
     if (!this.browser_context) {
       throw new Error('Browser context is not set');
@@ -5912,7 +5947,7 @@ export class BrowserSession {
 
     // Bring page to front before rendering
     try {
-      await page.bringToFront();
+      await this._withAbort(page.bringToFront(), signal);
     } catch (error) {
       // Ignore errors
     }
@@ -5925,7 +5960,10 @@ export class BrowserSession {
       );
 
       // Create CDP session for the screenshot
-      cdp_session = await this.get_or_create_cdp_session(page);
+      cdp_session = await this._withAbort(
+        this.get_or_create_cdp_session(page),
+        signal
+      );
 
       // Capture screenshot via CDP
       const screenshotParams: Record<string, unknown> = {
@@ -5943,10 +5981,10 @@ export class BrowserSession {
         };
       }
 
-      const screenshot_response = await cdp_session.send(
-        'Page.captureScreenshot',
-        screenshotParams
-      );
+      const screenshot_response = (await this._withAbort(
+        cdp_session.send('Page.captureScreenshot', screenshotParams),
+        signal
+      )) as { data?: string };
 
       const screenshot_b64 = screenshot_response.data;
       if (!screenshot_b64) {

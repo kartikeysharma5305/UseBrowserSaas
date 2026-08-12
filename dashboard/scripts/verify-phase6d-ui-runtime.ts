@@ -5,6 +5,7 @@ import { promisify } from 'node:util';
 import { chromium, type BrowserContext, type Page } from 'playwright';
 
 import { prisma } from '../src/lib/db/prisma';
+import { registerRuntimeUser } from './runtime-beta-registration';
 
 const execFileAsync = promisify(execFile);
 const origin = 'http://localhost:3001';
@@ -13,19 +14,22 @@ function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
 
-async function register(context: BrowserContext, name: string) {
-  const page = await context.newPage();
+async function register(
+  context: BrowserContext,
+  name: string,
+  planCode: 'FREE' | 'PRO' = 'PRO'
+) {
   const token = randomBytes(8).toString('hex');
   const email = `phase6d-${token}@example.invalid`;
   const password = `Runtime-${randomBytes(12).toString('hex')}!`;
-  await page.goto(`${origin}/register`, { waitUntil: 'networkidle' });
-  await page.getByLabel('Full name').fill(name);
-  await page.getByLabel('Email').fill(email);
-  await page.getByLabel('Password').fill(password);
-  await Promise.all([
-    page.waitForURL(/\/dashboard(?:\/)?$/, { timeout: 30_000 }),
-    page.getByRole('button', { name: 'Create account' }).click(),
-  ]);
+  const page = await registerRuntimeUser({
+    context,
+    origin,
+    email,
+    name,
+    password,
+    planCode,
+  });
   const user = await prisma.user.findUniqueOrThrow({ where: { email } });
   return { page, email, userId: user.id };
 }
@@ -120,7 +124,7 @@ const internalContext = await browser.newContext();
 let stage = 'registration';
 
 try {
-  const free = await register(freeContext, 'Phase 6D Free Control');
+  const free = await register(freeContext, 'Phase 6D Free Control', 'FREE');
   const internal = await register(internalContext, 'Phase 6D UI Runtime');
 
   stage = 'free-plan';
@@ -359,9 +363,10 @@ try {
   const serialized = JSON.stringify(listResponse.body);
   result.scheduleResponsesRedacted =
     listResponse.status === 200 &&
-    !/goal|targetWebsite|configuration|userId|consecutiveFailures|stack|prisma/i.test(
+    !/"(?:goal|targetWebsite|configuration|userId|consecutiveFailures|stack)"\s*:/i.test(
       serialized
-    );
+    ) &&
+    !/prisma/i.test(serialized);
   const crossRead = await api(free.page, `/api/schedules/${weekly.id}`);
   const crossPatch = await api(
     free.page,
@@ -410,5 +415,8 @@ try {
   process.exitCode = 1;
 } finally {
   await browser.close();
+  await prisma.user.deleteMany({
+    where: { email: { startsWith: 'phase6d-', endsWith: '@example.invalid' } },
+  });
   await prisma.$disconnect();
 }

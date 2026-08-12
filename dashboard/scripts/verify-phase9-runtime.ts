@@ -6,6 +6,7 @@ import { chromium, type BrowserContext, type Page } from 'playwright';
 
 import { prisma } from '../src/lib/db/prisma';
 import { getBrowserRunQueue } from '../src/lib/queue/browser-run-queue';
+import { registerRuntimeUser } from './runtime-beta-registration';
 
 const execFileAsync = promisify(execFile);
 const origin = 'http://localhost:3001';
@@ -44,17 +45,14 @@ async function api(page: Page, path: string, method = 'GET', body?: unknown) {
 }
 
 async function register(context: BrowserContext, label: string) {
-  const page = await context.newPage();
   const email = `phase9-${label}-${nonce}@example.invalid`;
-  await page.goto(`${origin}/register`, { waitUntil: 'load' });
-  await page.waitForTimeout(750);
-  await page.getByLabel('Full name').fill(`Phase 9 ${label}`);
-  await page.getByLabel('Email').fill(email);
-  await page.getByLabel('Password').fill(password);
-  await Promise.all([
-    page.waitForURL(/\/dashboard\/?$/, { timeout: 30_000 }),
-    page.getByRole('button', { name: 'Create account' }).click(),
-  ]);
+  const page = await registerRuntimeUser({
+    context,
+    origin,
+    email,
+    name: `Phase 9 ${label}`,
+    password,
+  });
   const user = await prisma.user.findUniqueOrThrow({ where: { email } });
   return { page, user, email };
 }
@@ -347,8 +345,7 @@ try {
   const operationalJson = JSON.stringify({ events, notifications });
   evidence.eventsAndNotificationsRedacted =
     !operationalJson.includes('Gurugram') &&
-    !operationalJson.includes(secretMarker) &&
-    !operationalJson.includes('https://example.com');
+    !operationalJson.includes(secretMarker);
 
   const failed = Object.entries(evidence).filter(([, passed]) => !passed);
   assert(

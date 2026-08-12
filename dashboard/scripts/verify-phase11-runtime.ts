@@ -4,6 +4,7 @@ import { chromium, type BrowserContext, type Page } from 'playwright';
 
 import { prisma } from '../src/lib/db/prisma';
 import { getBrowserRunQueue } from '../src/lib/queue/browser-run-queue';
+import { registerRuntimeUser } from './runtime-beta-registration';
 
 const origin = 'http://localhost:3001';
 const nonce = randomBytes(6).toString('hex');
@@ -35,16 +36,14 @@ async function api(page: Page, path: string, method = 'GET', body?: unknown) {
 }
 
 async function register(context: BrowserContext, label: string) {
-  const page = await context.newPage();
   const email = `phase11-${label}-${nonce}@example.invalid`;
-  await page.goto(`${origin}/register`, { waitUntil: 'load' });
-  await page.getByLabel('Full name').fill(`Phase 11 ${label}`);
-  await page.getByLabel('Email').fill(email);
-  await page.getByLabel('Password').fill(password);
-  await Promise.all([
-    page.waitForURL(/\/dashboard\/?$/, { timeout: 30_000 }),
-    page.getByRole('button', { name: 'Create account' }).click(),
-  ]);
+  const page = await registerRuntimeUser({
+    context,
+    origin,
+    email,
+    name: `Phase 11 ${label}`,
+    password,
+  });
   const user = await prisma.user.findUniqueOrThrow({ where: { email } });
   return { page, user };
 }

@@ -927,6 +927,11 @@ export interface AgentSettings {
   include_tool_call_examples: boolean;
   llm_timeout: number;
   step_timeout: number;
+  browser_start_timeout: number;
+  navigation_timeout: number;
+  page_ready_timeout: number;
+  action_timeout: number;
+  screenshot_timeout: number;
   final_response_after_failure: boolean;
   message_compaction: MessageCompactionSettings | null;
   loop_detection_window: number;
@@ -959,6 +964,11 @@ export const defaultAgentSettings = (): AgentSettings => ({
   include_tool_call_examples: false,
   llm_timeout: 60,
   step_timeout: 180,
+  browser_start_timeout: 30,
+  navigation_timeout: 45,
+  page_ready_timeout: 45,
+  action_timeout: 45,
+  screenshot_timeout: 15,
   final_response_after_failure: true,
   message_compaction: null,
   loop_detection_window: 20,

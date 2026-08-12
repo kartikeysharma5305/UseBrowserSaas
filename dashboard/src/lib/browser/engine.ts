@@ -31,6 +31,7 @@ import {
 import { safeEngineDomainPatterns } from '@/lib/execution-safety/domain-policy';
 import { NetworkResolutionError } from '@/lib/execution-safety/network';
 import { recordProviderRunOutcome } from '@/lib/operations/signals';
+import { armBrowserShutdownRejectionContainment } from '@/lib/worker/unhandled-browser-rejection';
 
 import {
   buildScreenshotCandidates,
@@ -177,6 +178,8 @@ function unsuccessfulHistoryCode(
 ): ExecutionErrorCode {
   const errors = stringArray(history.errors?.());
   for (const error of errors) {
+    const operationCode = operationFailureCode(error);
+    if (operationCode) return operationCode;
     const code = providerFailureCode(error);
     if (code) return code;
   }
@@ -191,6 +194,26 @@ function unsuccessfulHistoryCode(
   }
 
   return 'EXECUTION_FAILED';
+}
+
+const OPERATION_FAILURE_CODES = [
+  'BROWSER_START_TIMEOUT',
+  'NAVIGATION_TIMEOUT',
+  'PAGE_READY_TIMEOUT',
+  'BROWSER_ACTION_TIMEOUT',
+  'SCREENSHOT_TIMEOUT',
+] as const satisfies readonly ExecutionErrorCode[];
+
+function operationFailureCode(value: unknown): ExecutionErrorCode | null {
+  const message =
+    value instanceof Error
+      ? `${String((value as Error & { code?: unknown }).code ?? '')} ${value.message}`
+      : typeof value === 'string'
+        ? value
+        : typeof value === 'object' && value !== null
+          ? `${String((value as { code?: unknown }).code ?? '')} ${String((value as { message?: unknown }).message ?? '')}`
+          : '';
+  return OPERATION_FAILURE_CODES.find((code) => message.includes(code)) ?? null;
 }
 
 function executionFailure(
@@ -224,6 +247,14 @@ function executionFailure(
     return new ExecutionServiceError('EXECUTION_UNAVAILABLE', {
       cause: error,
       stage: 'heartbeat',
+      runId,
+    });
+  }
+  const operationCode = operationFailureCode(error);
+  if (operationCode) {
+    return new ExecutionServiceError(operationCode, {
+      cause: error,
+      stage,
       runId,
     });
   }
@@ -339,6 +370,7 @@ export class BrowserExecutionService {
 
     const closeBrowserOnce = () => {
       if (!closePromise) {
+        armBrowserShutdownRejectionContainment();
         closePromise = browserSession
           ? browserSession.close()
           : Promise.resolve();
@@ -403,6 +435,21 @@ export class BrowserExecutionService {
         source: 'dashboard',
         use_vision: input.configuration.browserSettings.useVision ?? true,
         register_signal_handlers: false,
+        run_deadline_ms: Date.now() + input.configuration.timeoutMs,
+        browser_start_timeout: Math.min(
+          30,
+          input.configuration.timeoutMs / 1000
+        ),
+        navigation_timeout: Math.min(45, input.configuration.timeoutMs / 1000),
+        page_ready_timeout: Math.min(45, input.configuration.timeoutMs / 1000),
+        llm_timeout: Math.min(60, input.configuration.timeoutMs / 1000),
+        action_timeout: Math.min(45, input.configuration.timeoutMs / 1000),
+        screenshot_timeout: Math.min(15, input.configuration.timeoutMs / 1000),
+        operation_observer: (event: {
+          operation: string;
+          status: 'BEGIN' | 'END' | 'FAILED' | 'TIMED_OUT';
+          duration_ms?: number;
+        }) => collector.recordOperation(event),
       });
       collector.attach(agent);
 
@@ -597,6 +644,9 @@ export class BrowserExecutionService {
           primaryFailure.code === 'NETWORK_RESOLUTION_FAILED' ||
           primaryFailure.code === 'AI_PROVIDER_RATE_LIMITED' ||
           primaryFailure.code.startsWith('PROVIDER_') ||
+          OPERATION_FAILURE_CODES.includes(
+            primaryFailure.code as (typeof OPERATION_FAILURE_CODES)[number]
+          ) ||
           primaryFailure.code === 'EXECUTION_STEP_LIMIT_EXCEEDED';
         const finalized = shouldPersistFailureCode
           ? await this.persistence.markRunFailed(

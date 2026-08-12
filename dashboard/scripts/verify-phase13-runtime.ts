@@ -1,9 +1,12 @@
 import { randomBytes } from 'node:crypto';
 import { chromium, type BrowserContext, type Page } from 'playwright';
+import Redis from 'ioredis';
 
 import { prisma } from '../src/lib/db/prisma';
 import { getBrowserRunQueue } from '../src/lib/queue/browser-run-queue';
 import { createArtifactStorage } from '../src/lib/browser/artifact-storage-factory';
+import { getPlan } from '../src/lib/plans/catalogue';
+import { registerRuntimeUser } from './runtime-beta-registration';
 
 const origin = 'http://localhost:3001';
 const nonce = randomBytes(6).toString('hex');
@@ -38,16 +41,14 @@ function assert(value: unknown, message: string): asserts value {
 }
 
 async function register(context: BrowserContext, label: string) {
-  const page = await context.newPage();
   const email = `phase13-${label}-${nonce}@example.invalid`;
-  await page.goto(`${origin}/register`, { waitUntil: 'load' });
-  await page.getByLabel('Full name').fill(`Phase 13 ${label}`);
-  await page.getByLabel('Email').fill(email);
-  await page.getByLabel('Password').fill(password);
-  await Promise.all([
-    page.waitForURL(/\/dashboard\/?$/, { timeout: 30_000 }),
-    page.getByRole('button', { name: 'Create account' }).click(),
-  ]);
+  const page = await registerRuntimeUser({
+    context,
+    origin,
+    email,
+    name: `Phase 13 ${label}`,
+    password,
+  });
   const user = await prisma.user.findUniqueOrThrow({ where: { email } });
   return { page, user };
 }
@@ -120,6 +121,7 @@ try {
   });
   assert(createdKey.status === 201, 'API key creation failed.');
   const key = createdKey.body.data.key as string;
+  const keyId = createdKey.body.data.id as string;
   evidence.oneTimePlaintext = /^bua_(?:live|test)_/.test(key);
   const listed = await sessionApi(owner.page, '/api/api-keys');
   const serializedList = JSON.stringify(listed.body);
@@ -164,12 +166,20 @@ try {
   ]);
   evidence.crossUserDenied = crossStatuses.every((item) => item.status === 404);
 
-  for (let index = 0; index < 80 && !evidence.rateLimited; index += 1) {
-    const response = await publicApi(key, '/api/v1/agents?limit=1');
-    evidence.rateLimited = response.status === 429 && Boolean(response.body.error?.code === 'RATE_LIMITED');
-  }
+  const redis = new Redis(process.env.REDIS_URL!, {
+    lazyConnect: true,
+    maxRetriesPerRequest: 1,
+    enableOfflineQueue: false,
+  });
+  await redis.connect();
+  const bucket = Math.floor(Date.now() / 60_000);
+  const limit = getPlan(owner.user.planCode).limits.apiKeyRequestsPerMinute;
+  await redis.set(`public-api:key:${keyId}:${bucket}`, String(limit), 'PX', 60_000);
+  redis.disconnect();
+  const limited = await publicApi(key, '/api/v1/agents?limit=1');
+  evidence.rateLimited =
+    limited.status === 429 && limited.body.error?.code === 'RATE_LIMITED';
 
-  const keyId = createdKey.body.data.id as string;
   assert((await sessionApi(owner.page, `/api/api-keys/${keyId}`, 'DELETE')).status === 200, 'Revocation failed.');
   evidence.revokeImmediate = (await publicApi(key, '/api/v1/agents')).status === 401;
 

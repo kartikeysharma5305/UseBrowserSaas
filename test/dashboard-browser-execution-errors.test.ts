@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   flush: vi.fn(),
   drain: vi.fn(),
   toArray: vi.fn(),
+  recordOperation: vi.fn(),
   buildScreenshotCandidates: vi.fn(),
   persistScreenshotCandidates: vi.fn(),
   logger: {
@@ -54,6 +55,7 @@ vi.mock('../dashboard/src/lib/browser/event-collector.js', () => ({
     flush = mocks.flush;
     drain = mocks.drain;
     toArray = mocks.toArray;
+    recordOperation = mocks.recordOperation;
   },
 }));
 
@@ -211,6 +213,50 @@ describe('BrowserExecutionService safe failure mapping', () => {
     expect(JSON.stringify(mocks.logger.error.mock.calls)).not.toContain(
       'gsk_providersecret'
     );
+  });
+
+  it('persists a browser-start timeout with its bounded subsystem code', async () => {
+    mocks.getLlmByName.mockReturnValue({});
+    mocks.agentRun.mockImplementation(async () => {
+      const options = mocks.agentOptions.mock.calls.at(-1)?.[0] as {
+        operation_observer?: (event: {
+          operation: string;
+          status: string;
+          duration_ms?: number;
+        }) => void;
+      };
+      options.operation_observer?.({
+        operation: 'BROWSER_START',
+        status: 'TIMED_OUT',
+        duration_ms: 30_000,
+      });
+      throw Object.assign(new Error('BROWSER_START_TIMEOUT'), {
+        code: 'BROWSER_START_TIMEOUT',
+      });
+    });
+
+    await expect(
+      new BrowserExecutionService().execute(input)
+    ).rejects.toMatchObject({
+      code: 'BROWSER_START_TIMEOUT',
+      status: 504,
+      publicMessage: 'The browser did not start in time.',
+    });
+    expect(mocks.recordOperation).toHaveBeenCalledWith({
+      operation: 'BROWSER_START',
+      status: 'TIMED_OUT',
+      duration_ms: 30_000,
+    });
+    expect(mocks.browserClose).toHaveBeenCalledOnce();
+    expect(mocks.markRunFailed).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.any(Date),
+      EXECUTION_ERROR_DEFINITIONS.BROWSER_START_TIMEOUT.message,
+      [],
+      [],
+      'BROWSER_START_TIMEOUT'
+    );
+    expect(mocks.markRunTimedOut).not.toHaveBeenCalled();
   });
 
   it('classifies an unsuccessful provider-rate-limit history without persisting provider details', async () => {

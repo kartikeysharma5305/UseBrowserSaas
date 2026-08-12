@@ -99,6 +99,26 @@ export const EXECUTION_ERROR_DEFINITIONS = {
     status: 504,
     message: 'The agent run exceeded its time limit.',
   },
+  BROWSER_START_TIMEOUT: {
+    status: 504,
+    message: 'The browser did not start in time.',
+  },
+  NAVIGATION_TIMEOUT: {
+    status: 504,
+    message: 'The target page did not finish initial navigation in time.',
+  },
+  PAGE_READY_TIMEOUT: {
+    status: 504,
+    message: 'The target page could not be read in time.',
+  },
+  BROWSER_ACTION_TIMEOUT: {
+    status: 504,
+    message: 'A browser action did not finish in time.',
+  },
+  SCREENSHOT_TIMEOUT: {
+    status: 504,
+    message: 'The browser screenshot did not finish in time.',
+  },
   EXECUTION_STEP_LIMIT_EXCEEDED: {
     status: 422,
     message: 'The agent run exceeded its step limit.',
@@ -193,6 +213,10 @@ const RETRYABLE_EXECUTION_ERROR_CODES: ReadonlySet<ExecutionErrorCode> =
   new Set([
     'EXECUTION_UNAVAILABLE',
     'NETWORK_RESOLUTION_FAILED',
+    'BROWSER_START_TIMEOUT',
+    'NAVIGATION_TIMEOUT',
+    'PAGE_READY_TIMEOUT',
+    'BROWSER_ACTION_TIMEOUT',
     'PROVIDER_UNAVAILABLE',
     'PROVIDER_TIMEOUT',
   ]);

@@ -8,6 +8,7 @@ import {
 } from 'playwright';
 
 import { prisma } from '../src/lib/db/prisma';
+import { registerRuntimeUser } from './runtime-beta-registration';
 
 const origin = 'http://localhost:3001';
 const nonce = randomBytes(8).toString('hex');
@@ -17,17 +18,14 @@ function assert(value: unknown, message: string): asserts value {
 }
 
 async function register(context: BrowserContext, label: string) {
-  const page = await context.newPage();
   const email = `phase8-${label}-${nonce}@example.invalid`;
-  await page.goto(`${origin}/register`, { waitUntil: 'load' });
-  await page.waitForTimeout(750);
-  await page.getByLabel('Full name').fill(`Phase 8 ${label}`);
-  await page.getByLabel('Email').fill(email);
-  await page.getByLabel('Password').fill(`Phase8-${nonce}-disposable!`);
-  await Promise.all([
-    page.waitForURL(/\/dashboard\/?$/, { timeout: 30_000 }),
-    page.getByRole('button', { name: 'Create account' }).click(),
-  ]);
+  const page = await registerRuntimeUser({
+    context,
+    origin,
+    email,
+    name: `Phase 8 ${label}`,
+    password: `Phase8-${nonce}-disposable!`,
+  });
   const user = await prisma.user.findUniqueOrThrow({ where: { email } });
   return { page, userId: user.id };
 }

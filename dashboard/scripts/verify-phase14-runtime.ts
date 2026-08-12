@@ -9,6 +9,7 @@ import {
   verifyWebhookSignature,
 } from '../src/lib/webhooks/crypto';
 import { assertWebhookTarget } from '../src/lib/webhooks/network';
+import { registerRuntimeUser } from './runtime-beta-registration';
 
 const origin = 'http://localhost:3001';
 const receiverUrl = 'http://127.0.0.1:8787/hook';
@@ -89,16 +90,14 @@ async function waitFor<T>(
 }
 
 async function register(context: BrowserContext, label: string) {
-  const page = await context.newPage();
   const email = `phase14-${label}-${nonce}@example.invalid`;
-  await page.goto(`${origin}/register`, { waitUntil: 'load' });
-  await page.getByLabel('Full name').fill(`Phase 14 ${label}`);
-  await page.getByLabel('Email').fill(email);
-  await page.getByLabel('Password').fill(password);
-  await Promise.all([
-    page.waitForURL(/\/dashboard\/?$/, { timeout: 30_000 }),
-    page.getByRole('button', { name: 'Create account' }).click(),
-  ]);
+  const page = await registerRuntimeUser({
+    context,
+    origin,
+    email,
+    name: `Phase 14 ${label}`,
+    password,
+  });
   const user = await prisma.user.findUniqueOrThrow({ where: { email } });
   return { page, user };
 }
