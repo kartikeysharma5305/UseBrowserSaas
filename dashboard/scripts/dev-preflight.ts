@@ -78,6 +78,23 @@ function validatedUrl(
 }
 
 async function assertPortAvailable(port: number): Promise<void> {
+  const alreadyListening = await new Promise<boolean>((resolve) => {
+    const socket = net.createConnection({ host: '127.0.0.1', port });
+    const finish = (listening: boolean) => {
+      socket.destroy();
+      resolve(listening);
+    };
+    socket.setTimeout(1_000);
+    socket.once('connect', () => finish(true));
+    socket.once('timeout', () => finish(false));
+    socket.once('error', () => finish(false));
+  });
+  if (alreadyListening) {
+    fail(
+      `Dashboard port ${port} is already in use. Stop the existing dev:all process before starting another one.`
+    );
+  }
+
   await new Promise<void>((resolve, reject) => {
     const server = net.createServer();
     server.unref();
@@ -254,6 +271,13 @@ async function main(): Promise<void> {
   pass('Required server configuration present');
   pass('Groq key configured');
 
+  // Check this before Prisma generation. On Windows an existing dashboard or
+  // worker keeps Prisma's native query engine DLL open, which otherwise turns
+  // a duplicate dev:all launch into a misleading EPERM rename failure.
+  currentCheck = 'dashboard port';
+  await assertPortAvailable(3001);
+  pass('Dashboard port 3001 available');
+
   currentCheck = 'Prisma schema';
   if (!existsSync(path.join(dashboardRoot, 'prisma', 'schema.prisma'))) {
     fail('Prisma schema is missing.');
@@ -276,10 +300,6 @@ async function main(): Promise<void> {
   currentCheck = 'Redis';
   await checkRedis(redisUrl.href);
   pass('Redis reachable');
-
-  currentCheck = 'dashboard port';
-  await assertPortAvailable(3001);
-  pass('Dashboard port 3001 available');
 }
 
 try {
