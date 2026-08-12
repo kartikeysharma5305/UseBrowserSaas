@@ -63,7 +63,11 @@ export function MobileNavigation({
               Dashboard
             </h2>
           </div>
-          <Button variant="ghost" onClick={onClose}>
+          <Button
+            variant="ghost"
+            onClick={onClose}
+            aria-label="Close navigation"
+          >
             <X className="h-4 w-4" />
           </Button>
         </div>

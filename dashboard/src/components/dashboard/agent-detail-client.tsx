@@ -423,7 +423,7 @@ export function AgentDetailClient({ id }: { id: string }) {
           </h1>
           {running && (
             <p className="mt-1 text-sm text-blue-600 dark:text-blue-400">
-              Execution in progress... This page will refresh automatically.
+              Run in progress. Open the Run detail to follow each step live.
             </p>
           )}
         </div>
@@ -494,7 +494,9 @@ export function AgentDetailClient({ id }: { id: string }) {
             <div className="flex justify-between gap-3">
               <dt className="text-slate-500 dark:text-slate-400">Timeout</dt>
               <dd className="font-medium text-slate-900 dark:text-slate-100">
-                {agent.configuration?.timeoutMs ?? 'Unknown'} ms
+                {agent.configuration?.timeoutMs
+                  ? `${Math.round(agent.configuration.timeoutMs / 1000)} seconds`
+                  : 'Unknown'}
               </dd>
             </div>
             <div className="flex justify-between gap-3">

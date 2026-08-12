@@ -27,7 +27,7 @@ export function DashboardShell({ user, children, beta }: DashboardShellProps) {
         onClose={() => setMobileOpen(false)}
       />
 
-      <div className="flex min-h-screen flex-1 flex-col">
+      <div className="flex min-h-screen min-w-0 flex-1 flex-col">
         <Navbar
           userName={user.name ?? user.email ?? 'Authenticated user'}
           userEmail={user.email ?? 'No email'}
@@ -51,7 +51,7 @@ export function DashboardShell({ user, children, beta }: DashboardShellProps) {
             </a>
           </div>
         ) : null}
-        <main className="flex-1 p-4 md:p-6 lg:p-8">{children}</main>
+        <main className="min-w-0 flex-1 p-4 md:p-6 lg:p-8">{children}</main>
       </div>
     </div>
   );

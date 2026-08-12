@@ -137,7 +137,7 @@ export function UsageDashboard() {
           </p>
           <p className="mt-2 text-2xl font-semibold">{current.plan.name}</p>
           <p className="mt-1 text-sm text-slate-500">
-            Assigned manually during development
+            Limits and features currently available to this account
           </p>
         </Card>
         <Card className="p-5">

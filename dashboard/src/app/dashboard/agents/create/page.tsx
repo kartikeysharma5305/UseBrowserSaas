@@ -162,6 +162,9 @@ export default function CreateAgentPage() {
                 required
                 className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 transition-colors placeholder:text-slate-400 focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-300 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:placeholder:text-slate-500 dark:focus:border-slate-600 dark:focus:ring-slate-600"
               />
+              <span className="block text-xs text-slate-500">
+                The starting page for this Agent. Use a complete HTTPS address.
+              </span>
             </label>
           </div>
 
@@ -210,6 +213,9 @@ export default function CreateAgentPage() {
                   </option>
                 ))}
               </select>
+              <span className="block text-xs text-slate-500">
+                Choose from the AI models configured for this deployment.
+              </span>
             </label>
             <label className="space-y-2">
               <span className="text-sm font-medium text-slate-700 dark:text-slate-200">
@@ -236,6 +242,9 @@ export default function CreateAgentPage() {
                 defaultValue="60000"
                 className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 transition-colors placeholder:text-slate-400 focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-300 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:placeholder:text-slate-500 dark:focus:border-slate-600 dark:focus:ring-slate-600"
               />
+              <span className="block text-xs text-slate-500">
+                60,000 ms = 1 minute · 300,000 ms = 5 minutes.
+              </span>
             </label>
           </div>
 
@@ -298,7 +307,7 @@ export default function CreateAgentPage() {
               defaultChecked
               className="rounded border-slate-300 dark:border-slate-600"
             />
-            Headless browser
+            Run browser in the background (recommended)
           </label>
 
           <AgentVariableEditor variables={variables} onChange={setVariables} />
@@ -311,9 +320,8 @@ export default function CreateAgentPage() {
                 Execution safety
               </legend>
               <p className="text-sm text-slate-500 dark:text-slate-400">
-                These restrictions are snapshotted per Run and enforced by the
-                worker. Downloads, uploads, payments, private networks, and
-                unsafe URL schemes are blocked.
+                Control where the Agent may navigate and which interactions it
+                may perform. These safeguards are enforced for every Run.
               </p>
             </div>
             <div className="grid gap-4 md:grid-cols-2">
@@ -394,7 +402,7 @@ export default function CreateAgentPage() {
                 destructive actions
               </label>
               <span className="text-slate-500">
-                Downloads: blocked · Uploads: blocked · Payments: blocked
+                Always blocked: downloads, uploads, payments, private networks
               </span>
             </div>
           </fieldset>

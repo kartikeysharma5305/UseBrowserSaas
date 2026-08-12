@@ -3,6 +3,9 @@ import { StatusBadge } from '@/components/dashboard/status-badge';
 import { formatDate } from '@/lib/utils/format-date';
 import { formatRunResult } from '@/lib/utils/format-run-result';
 import type { RunRecord } from '@/lib/types';
+import { formatElapsed } from '@/lib/observability/presentation';
+import Link from 'next/link';
+import { Eye } from 'lucide-react';
 
 type RunTableProps = {
   runs: RunRecord[];
@@ -12,7 +15,7 @@ export function RunTable({ runs }: RunTableProps) {
   return (
     <Card className="overflow-hidden">
       <div className="overflow-x-auto">
-        <table className="min-w-full text-left text-sm">
+        <table className="min-w-[760px] text-left text-sm">
           <thead className="bg-slate-50 text-slate-600 dark:bg-slate-800 dark:text-slate-300">
             <tr>
               <th className="px-4 py-3 font-medium">Agent</th>
@@ -40,13 +43,15 @@ export function RunTable({ runs }: RunTableProps) {
                   {run.completedAt ? formatDate(run.completedAt) : '—'}
                 </td>
                 <td className="px-4 py-4 text-slate-600 dark:text-slate-400">
-                  {run.duration ?? '—'}
+                  {formatElapsed(run.duration)}
                 </td>
                 <td className="px-4 py-4">
                   <StatusBadge status={run.status} />
                 </td>
-                <td className="px-4 py-4 text-slate-600 dark:text-slate-400">
-                  {formatRunResult(run.result)}
+                <td className="max-w-xs px-4 py-4 text-slate-600 dark:text-slate-400">
+                  <span className="line-clamp-2">
+                    {run.errorMessage ?? formatRunResult(run.result)}
+                  </span>
                 </td>
                 <td className="px-4 py-4 text-right">
                   <Link
@@ -66,5 +71,3 @@ export function RunTable({ runs }: RunTableProps) {
     </Card>
   );
 }
-import Link from 'next/link';
-import { Eye } from 'lucide-react';

@@ -7,12 +7,12 @@ export function StatusBadge({ status }: { status: string }) {
     return <Badge tone="success">{normalized}</Badge>;
   }
 
-  if (
-    normalized === 'PAUSED' ||
-    normalized === 'FAILED' ||
-    normalized === 'TIMED_OUT'
-  ) {
+  if (normalized === 'PAUSED' || normalized === 'TIMED_OUT') {
     return <Badge tone="warning">{normalized}</Badge>;
+  }
+
+  if (normalized === 'FAILED') {
+    return <Badge tone="danger">{normalized}</Badge>;
   }
 
   if (normalized === 'RUNNING') {

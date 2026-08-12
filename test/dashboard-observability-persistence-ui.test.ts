@@ -356,9 +356,10 @@ describe('observable run UI wiring', () => {
       path.join(dashboard, 'src/components/dashboard/run-detail-client.tsx'),
       'utf8'
     );
-    expect(source).toContain('Execution timeline');
+    expect(source).toContain('Run steps');
+    expect(source).toContain('Technical details');
     expect(source).toContain('Screenshots');
-    expect(source).toContain('No events recorded for this run.');
+    expect(source).toContain('No completed steps were recorded.');
     expect(source).toContain('No screenshots were captured.');
   });
 

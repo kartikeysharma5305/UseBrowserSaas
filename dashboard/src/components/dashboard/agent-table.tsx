@@ -29,7 +29,7 @@ export function AgentTable({
   return (
     <Card className="overflow-hidden">
       <div className="overflow-x-auto">
-        <table className="min-w-full text-left text-sm">
+        <table className="min-w-[820px] text-left text-sm">
           <thead className="bg-slate-50 text-slate-600 dark:bg-slate-800 dark:text-slate-300">
             <tr>
               <th className="px-4 py-3 font-medium">Name</th>
@@ -56,8 +56,10 @@ export function AgentTable({
                     </p>
                   </div>
                 </td>
-                <td className="px-4 py-4 text-slate-600 dark:text-slate-400">
-                  {agent.targetWebsite}
+                <td className="max-w-xs px-4 py-4 text-slate-600 dark:text-slate-400">
+                  <span className="block truncate" title={agent.targetWebsite}>
+                    {agent.targetWebsite}
+                  </span>
                 </td>
                 <td className="px-4 py-4">
                   <StatusBadge status={agent.status} />

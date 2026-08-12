@@ -28,6 +28,13 @@ import type {
   RunStreamStatus,
 } from '@/lib/types';
 import { buildTimeline, timelineTone } from '@/lib/observability/timeline';
+import {
+  currentRunActivity,
+  describeMeaningfulStep,
+  failurePresentation,
+  formatElapsed,
+  meaningfulTimelineEvents,
+} from '@/lib/observability/presentation';
 import { formatDate } from '@/lib/utils/format-date';
 import {
   formatRunResultDetails,
@@ -283,6 +290,10 @@ export function RunDetailClient({ runId }: { runId: string }) {
     () => buildTimeline(events, artifacts),
     [events, artifacts]
   );
+  const meaningfulSteps = useMemo(
+    () => meaningfulTimelineEvents(timeline),
+    [timeline]
+  );
 
   if (loading) {
     return (
@@ -296,15 +307,20 @@ export function RunDetailClient({ runId }: { runId: string }) {
   const browserResult = isBrowserRunResult(run.result);
   const summary = getRunSummary(run.result);
   const visitedUrls = getVisitedUrls(run.result);
-  const stepCount = new Set(
-    timeline
+  const numberedStepCount = new Set(
+    meaningfulSteps
       .map((event) => event.structuredData.stepNumber)
       .filter((step): step is number => typeof step === 'number')
   ).size;
+  const stepCount = numberedStepCount || meaningfulSteps.length;
   const selected =
     selectedArtifact === null ? null : (artifacts[selectedArtifact] ?? null);
   const active = run.status === 'QUEUED' || run.status === 'RUNNING';
   const cancellationPending = Boolean(run.cancelRequestedAt);
+  const currentActivity = currentRunActivity(timeline);
+  const failure = run.errorMessage
+    ? failurePresentation(run.errorMessage, run.status)
+    : null;
 
   function moveScreenshot(offset: number) {
     if (selectedArtifact === null || artifacts.length === 0) return;
@@ -381,10 +397,12 @@ export function RunDetailClient({ runId }: { runId: string }) {
           <p className="text-sm text-slate-500">
             {(run.attempt ?? 1) > 1 ? 'Total run duration' : 'Duration'}
           </p>
-          <p className="mt-2 text-xl font-semibold">{run.duration ?? '—'} ms</p>
+          <p className="mt-2 text-xl font-semibold">
+            {formatElapsed(run.duration)}
+          </p>
           {(run.attempt ?? 1) > 1 && run.attemptDuration != null && (
             <p className="mt-1 text-xs text-slate-500">
-              Final attempt: {run.attemptDuration ?? '—'} ms
+              Final attempt: {formatElapsed(run.attemptDuration)}
             </p>
           )}
         </Card>
@@ -399,6 +417,24 @@ export function RunDetailClient({ runId }: { runId: string }) {
           </p>
         </Card>
       </div>
+
+      {active && (
+        <Card className="border-sky-200 bg-sky-50/70 p-5 dark:border-sky-900 dark:bg-sky-950/30">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="text-sm font-semibold text-sky-900 dark:text-sky-100">
+                {run.status === 'QUEUED'
+                  ? 'Waiting to start'
+                  : 'Run in progress'}
+              </p>
+              <p className="mt-1 text-lg font-medium">{currentActivity}</p>
+            </div>
+            <p className="text-sm text-sky-800 dark:text-sky-200">
+              {stepCount} {stepCount === 1 ? 'step' : 'steps'} completed
+            </p>
+          </div>
+        </Card>
+      )}
 
       {run.inputSnapshot ? (
         <Card className="p-5">
@@ -435,10 +471,10 @@ export function RunDetailClient({ runId }: { runId: string }) {
         </Card>
       ) : null}
 
-      {run.errorMessage && (
+      {failure && (
         <div className="border-l-4 border-rose-500 bg-rose-50 p-4 text-sm text-rose-800 dark:bg-rose-950/40 dark:text-rose-300">
-          <p className="font-semibold">Execution failed</p>
-          <p className="mt-1">{run.errorMessage}</p>
+          <p className="font-semibold">{failure.title}</p>
+          <p className="mt-1">{failure.description}</p>
         </div>
       )}
       {run.status === 'CANCELED' && (
@@ -566,22 +602,23 @@ export function RunDetailClient({ runId }: { runId: string }) {
       <section>
         <div className="flex items-end justify-between gap-3">
           <div>
-            <h2 className="text-lg font-semibold">Execution timeline</h2>
+            <h2 className="text-lg font-semibold">Run steps</h2>
             <p className="text-sm text-slate-500">
-              Persisted in deterministic order.
+              Meaningful actions completed by the Agent.
             </p>
           </div>
           <span className="text-sm text-slate-500">
-            {timeline.length} events
+            {meaningfulSteps.length}{' '}
+            {meaningfulSteps.length === 1 ? 'step' : 'steps'}
           </span>
         </div>
         <div className="mt-4 space-y-3">
-          {timeline.length === 0 ? (
+          {meaningfulSteps.length === 0 ? (
             <p className="text-sm text-slate-500">
-              No events recorded for this run.
+              {active ? currentActivity : 'No completed steps were recorded.'}
             </p>
           ) : (
-            timeline.map((event) => {
+            meaningfulSteps.map((event, index) => {
               const tone = timelineTone(
                 event.type,
                 event.structuredData.success
@@ -593,22 +630,17 @@ export function RunDetailClient({ runId }: { runId: string }) {
                 >
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="flex items-center gap-2 text-xs font-semibold uppercase text-slate-600 dark:text-slate-300">
-                      <span>#{event.displaySequence}</span>
-                      <span>{event.type.replaceAll('_', ' ')}</span>
-                      {event.structuredData.stepNumber !== undefined && (
-                        <span>Step {event.structuredData.stepNumber}</span>
-                      )}
+                      <span>
+                        Step {event.structuredData.stepNumber ?? index + 1}
+                      </span>
                     </div>
                     <time className="text-xs text-slate-500">
                       {formatDate(event.timestamp)}
                     </time>
                   </div>
-                  <p className="mt-2 text-sm font-medium">{event.message}</p>
-                  {event.structuredData.actionSummary && (
-                    <p className="mt-1 text-sm text-slate-600 dark:text-slate-300">
-                      Action: {event.structuredData.actionSummary}
-                    </p>
-                  )}
+                  <p className="mt-2 text-sm font-medium">
+                    {describeMeaningfulStep(event)}
+                  </p>
                   {event.structuredData.url && (
                     <a
                       href={event.structuredData.url}
@@ -637,22 +669,39 @@ export function RunDetailClient({ runId }: { runId: string }) {
                       ))}
                     </div>
                   )}
-                  {event.data && (
-                    <details className="mt-3 text-xs text-slate-500">
-                      <summary className="cursor-pointer">
-                        Structured details
-                      </summary>
-                      <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words">
-                        {JSON.stringify(event.structuredData, null, 2)}
-                      </pre>
-                    </details>
-                  )}
                 </article>
               );
             })
           )}
         </div>
       </section>
+
+      <details className="rounded-lg border border-slate-200 p-4 dark:border-slate-800">
+        <summary className="cursor-pointer text-sm font-semibold">
+          Technical details ({timeline.length} events)
+        </summary>
+        <p className="mt-2 text-xs text-slate-500">
+          Detailed execution events are retained for troubleshooting.
+        </p>
+        <ol className="mt-3 max-h-96 space-y-2 overflow-auto text-xs">
+          {timeline.map((event) => (
+            <li
+              key={event.id}
+              className="border-l-2 border-slate-200 pl-3 dark:border-slate-700"
+            >
+              <span className="font-semibold">
+                #{event.displaySequence} · {event.type.replaceAll('_', ' ')}
+              </span>
+              <span className="ml-2 text-slate-500">{event.message}</span>
+              {event.structuredData.durationMs !== undefined && (
+                <span className="ml-2 text-slate-500">
+                  {formatElapsed(event.structuredData.durationMs)}
+                </span>
+              )}
+            </li>
+          ))}
+        </ol>
+      </details>
 
       <section>
         <h2 className="text-lg font-semibold">Screenshots</h2>
@@ -672,9 +721,8 @@ export function RunDetailClient({ runId }: { runId: string }) {
                   {artifact.stepNumber
                     ? `Step ${artifact.stepNumber}`
                     : 'Unassigned step'}
-                  {artifact.eventSequence
-                    ? ` · Event #${artifact.eventSequence}`
-                    : ''}
+                  {' · '}
+                  {formatDate(artifact.createdAt)}
                 </p>
               </div>
             ))}
