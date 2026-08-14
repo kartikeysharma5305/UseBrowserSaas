@@ -191,7 +191,13 @@ export const EXECUTION_ERROR_DEFINITIONS = {
   },
   FORM_SUBMISSION_BLOCKED: {
     status: 403,
-    message: 'Form submission blocked by execution safety policy.',
+    message:
+      'Form interaction blocked. Enable form interactions for this Agent to fill and submit login forms.',
+  },
+  CREDENTIAL_RETRY_BLOCKED: {
+    status: 403,
+    message:
+      'Login was not retried because the supplied credentials were already entered once.',
   },
   DESTRUCTIVE_ACTION_BLOCKED: {
     status: 403,

@@ -222,6 +222,16 @@ export function AgentDetailClient({ id }: { id: string }) {
       const payload: {
         data?: { runId?: string; detailsUrl?: string; status?: string };
       } = await response.json();
+      setVariableValues((current) =>
+        Object.fromEntries(
+          Object.entries(current).filter(
+            ([key]) =>
+              !agent?.variables?.some(
+                (variable) => variable.key === key && variable.type === 'SECRET'
+              )
+          )
+        )
+      );
       const detailsUrl = payload.data?.detailsUrl;
       if (detailsUrl) {
         window.location.href = detailsUrl;
@@ -623,7 +633,9 @@ export function AgentDetailClient({ id }: { id: string }) {
               </select>
             </label>
             <label className="space-y-1">
-              <span className="text-sm font-medium">Forms</span>
+              <span className="text-sm font-medium">
+                Allow form interactions
+              </span>
               <select
                 value={safetyDraft.formSubmissionMode}
                 onChange={(event) =>
@@ -636,9 +648,14 @@ export function AgentDetailClient({ id }: { id: string }) {
                 className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800"
               >
                 <option value="BLOCKED">Blocked</option>
-                <option value="SAFE_ONLY">Safe only</option>
+                <option value="SAFE_ONLY">Ordinary forms only</option>
                 <option value="ALLOWED">Allowed</option>
               </select>
+              <span className="block text-xs text-slate-500">
+                Allows typing into and submitting ordinary forms, including
+                login forms. Payments, uploads, downloads, and destructive
+                actions remain separately controlled.
+              </span>
             </label>
             <label className="space-y-1">
               <span className="text-sm font-medium">Max navigations</span>

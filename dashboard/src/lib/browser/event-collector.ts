@@ -89,7 +89,8 @@ export class EventCollector {
 
   constructor(
     private readonly initialSequence = 2,
-    private readonly onEvent?: CollectedEventHandler
+    private readonly onEvent?: CollectedEventHandler,
+    private readonly redactText: (value: string) => string = (value) => value
   ) {
     this.nextSequence = initialSequence;
   }
@@ -229,8 +230,11 @@ export class EventCollector {
       ...action,
       url: normalizeEventUrl(stepEvent.url),
     });
-    const message =
-      truncateEventText(stepEvent.evaluation_previous_goal) ?? 'Step executed.';
+    const rawMessage =
+      typeof stepEvent.evaluation_previous_goal === 'string'
+        ? this.redactText(stepEvent.evaluation_previous_goal)
+        : stepEvent.evaluation_previous_goal;
+    const message = truncateEventText(rawMessage) ?? 'Step executed.';
     const screenshotUrl =
       typeof stepEvent.screenshot_url === 'string'
         ? stepEvent.screenshot_url

@@ -74,7 +74,7 @@ describe('Phase 9 durable integration boundaries', () => {
       'dashboard/src/lib/worker/browser-run-processor.ts',
       'utf8'
     );
-    expect(producer).toContain('inputSnapshot: resolved.snapshot');
+    expect(producer).toContain('...(secretEnvelope ? { secretEnvelope } : {})');
     expect(producer).toContain('executionTask: resolved.task');
     expect(lease).toContain('executionTask: string | null');
     expect(processor).toContain('task: claimed.executionTask');

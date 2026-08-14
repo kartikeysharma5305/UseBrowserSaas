@@ -33,6 +33,13 @@ export type PublicInputSnapshot = {
   rendered: { goal: string; targetWebsite: string };
 };
 
+export type ResolvedAgentInput = {
+  task: string;
+  targetWebsite: string;
+  snapshot: PublicInputSnapshot;
+  secretValues: Record<string, string>;
+};
+
 export class VariableResolutionError extends Error {
   constructor(
     readonly code:
@@ -61,11 +68,6 @@ function normalize(
   definition: VariableDefinition,
   raw: string | number | boolean
 ) {
-  if (definition.type === 'SECRET')
-    throw new VariableResolutionError(
-      'SECRET_VARIABLE_UNAVAILABLE',
-      'Secret variables require secure credentials support.'
-    );
   const rules = constraints(definition);
   if (definition.type === 'BOOLEAN') {
     if (typeof raw === 'boolean') return raw;
@@ -100,7 +102,7 @@ function normalize(
       'INVALID_VARIABLE_VALUE',
       `${definition.label} must be text.`
     );
-  const value = raw.trim();
+  const value = definition.type === 'SECRET' ? raw : raw.trim();
   if (definition.type === 'URL') {
     try {
       const url = new URL(value);
@@ -162,7 +164,7 @@ export function resolveAgentInput(input: {
   definitions: VariableDefinition[];
   supplied?: VariableValuesInput;
   definitionVersion: number;
-}): { task: string; targetWebsite: string; snapshot: PublicInputSnapshot } {
+}): ResolvedAgentInput {
   const supplied = input.supplied ?? {};
   const definitions = [...input.definitions].sort(
     (a, b) => a.displayOrder - b.displayOrder
@@ -184,7 +186,23 @@ export function resolveAgentInput(input: {
         `Declare the ${key} variable before running.`
       );
 
+  const targetPlaceholders = new Set(detectedPlaceholders(input.targetWebsite));
+  for (const definition of definitions)
+    if (definition.type === 'SECRET') {
+      if (definition.key.endsWith('bu_2fa_code'))
+        throw new VariableResolutionError(
+          'INVALID_VARIABLE_VALUE',
+          'MFA and OTP secrets are not supported.'
+        );
+      if (targetPlaceholders.has(definition.key))
+        throw new VariableResolutionError(
+          'INVALID_VARIABLE_VALUE',
+          'Secret variables cannot be used in the target URL.'
+        );
+    }
+
   const values = new Map<string, string | number | boolean>();
+  const secretValues: Record<string, string> = Object.create(null);
   const snapshotValues: PublicInputSnapshot['values'] = [];
   for (const definition of definitions) {
     const hasSupplied = Object.prototype.hasOwnProperty.call(
@@ -195,11 +213,6 @@ export function resolveAgentInput(input: {
       ? supplied[definition.key]
       : definition.defaultValue;
     const needed = definition.required || placeholders.includes(definition.key);
-    if (definition.type === 'SECRET' && (needed || hasSupplied))
-      throw new VariableResolutionError(
-        'SECRET_VARIABLE_UNAVAILABLE',
-        'Secret variables require secure credentials support.'
-      );
     if (raw === null || raw === undefined || raw === '') {
       if (needed)
         throw new VariableResolutionError(
@@ -209,14 +222,20 @@ export function resolveAgentInput(input: {
       continue;
     }
     const value = normalize(definition, raw);
-    values.set(definition.key, value);
+    const secret = definition.type === 'SECRET';
+    if (secret) {
+      secretValues[definition.key] = String(value);
+      values.set(definition.key, `<secret>${definition.key}</secret>`);
+    } else {
+      values.set(definition.key, value);
+    }
     snapshotValues.push({
       key: definition.key,
       label: definition.label,
       type: definition.type,
-      value,
+      value: secret ? REDACTED_SECRET : value,
       source: hasSupplied ? 'supplied' : 'default',
-      redacted: false,
+      redacted: secret,
     });
   }
   const goal = render(input.goal, values, new Set(byKey.keys()));
@@ -249,9 +268,14 @@ export function resolveAgentInput(input: {
     rendered: { goal, targetWebsite },
   };
   return {
-    task: `${goal} Navigate to ${targetWebsite}.`,
+    task: `${goal} Navigate to ${targetWebsite}.${
+      Object.keys(secretValues).length
+        ? ' Use secret references only in their intended editable sign-in fields. Submit the supplied credentials at most once. If login is rejected, or CAPTCHA, MFA, OTP, a hardware key, account lock, or another verification challenge appears, stop and report that user interaction is required. Never reveal a secret in the result.'
+        : ''
+    }`,
     targetWebsite,
     snapshot,
+    secretValues,
   };
 }
 

@@ -22,7 +22,7 @@ Redirects are same-domain by default. `ALLOWED_DOMAINS` permits redirects only t
 
 ## Actions, files, and sensitive domains
 
-Click metadata is checked before execution. Payment/purchase semantics are always rejected. Destructive semantics are rejected unless the Agent explicitly enables them. Form modes are `BLOCKED`, `SAFE_ONLY`, and `ALLOWED`; safe-only rejects financial and destructive submission semantics. These checks use deterministic action/DOM metadata where available. Free-form coordinate clicks and arbitrary page semantics cannot be classified perfectly; deployment-level browser isolation remains required.
+Click metadata is checked before execution. Payment/purchase semantics are always rejected. Destructive semantics are rejected unless the Agent explicitly enables them. Form modes are `BLOCKED`, `SAFE_ONLY`, and `ALLOWED`; blocked mode rejects both text entry and submission, while safe-only permits ordinary forms such as login but rejects financial and destructive submission semantics. Secret-backed input is domain-scoped and each resolved value can be entered only once per Run. These checks use deterministic action/DOM metadata where available. Free-form coordinate clicks and arbitrary page semantics cannot be classified perfectly; deployment-level browser isolation remains required.
 
 Browser downloads are disabled in the profile, no download directory is exposed, and blocked downloads never enter artifact persistence. Upload actions are rejected before filesystem access. The maintainable source-controlled sensitive-domain category currently covers representative payment, banking/crypto, password-manager, email, and cloud-console services; it is conservative rather than globally comprehensive.
 

@@ -419,7 +419,7 @@ describe('SystemPrompt template selection parity', () => {
     const prompt = new SystemPrompt(3, null, null, false);
     const text = prompt.get_system_message().text;
 
-    expect(text).toContain('CAPTCHAs are automatically solved by the browser.');
+    expect(text).toContain('Never attempt to solve or bypass a CAPTCHA');
     expect(text).toContain('Verify data grounding:');
     expect(text).toContain('Blocking error check:');
   });
@@ -509,8 +509,10 @@ describe('SystemPrompt template selection parity', () => {
     );
     const text = prompt.get_system_message().text;
 
-    expect(text).toContain('CAPTCHAs are automatically solved by the browser.');
-    expect(text).toContain('Are there any obstacles (popups, login walls)?');
+    expect(text).toContain('Never attempt to solve or bypass a CAPTCHA');
+    expect(text).toContain(
+      'Are there any obstacles (popups, login walls, CAPTCHA, or verification challenges)?'
+    );
     expect(text).toContain('Blocking error check:');
     expect(text).toContain('1. <user_request>: Your ultimate objective.');
     expect(text).toContain(

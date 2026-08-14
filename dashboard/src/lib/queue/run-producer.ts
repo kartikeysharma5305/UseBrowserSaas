@@ -29,6 +29,7 @@ import {
   resolveAgentInput,
   VariableResolutionError,
 } from '@/lib/variables/resolver';
+import { protectRunSecrets } from '@/lib/variables/run-secrets';
 import {
   normalizeSafetyPolicy,
   safetyPolicyInput,
@@ -206,12 +207,18 @@ async function reserveQueuedRun(
       }
       let safetyPolicy;
       let outputSchema;
+      let secretEnvelope;
       try {
         safetyPolicy = normalizeSafetyPolicy(
           agent.safetyPolicy,
           resolved.targetWebsite
         );
         assertStaticUrlAllowed(resolved.targetWebsite, safetyPolicy);
+        secretEnvelope = protectRunSecrets(
+          resolved.secretValues,
+          runId,
+          input.agentId
+        );
         outputSchema = normalizeOutputSchema(agent.outputSchema);
       } catch (error) {
         throw new ExecutionServiceError('INVALID_AGENT_CONFIGURATION', {
@@ -239,7 +246,10 @@ async function reserveQueuedRun(
           queueJobId: runId,
           queuedAt,
           startedAt: queuedAt,
-          inputSnapshot: resolved.snapshot as unknown as Prisma.InputJsonValue,
+          inputSnapshot: {
+            ...resolved.snapshot,
+            ...(secretEnvelope ? { secretEnvelope } : {}),
+          } as unknown as Prisma.InputJsonValue,
           executionTask: resolved.task,
           executionTargetWebsite: resolved.targetWebsite,
           executionConfiguration:

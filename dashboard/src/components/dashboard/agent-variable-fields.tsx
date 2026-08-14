@@ -64,7 +64,7 @@ export function VariableValueFields({
                 autoComplete={
                   variable.type === 'SECRET' ? 'new-password' : 'off'
                 }
-                required={variable.required && variable.type !== 'SECRET'}
+                required={variable.required}
                 value={String(current)}
                 onChange={(event) =>
                   onChange({ ...values, [variable.key]: event.target.value })
@@ -78,8 +78,9 @@ export function VariableValueFields({
             ) : null}
             {variable.type === 'SECRET' ? (
               <span className="block text-xs text-amber-700 dark:text-amber-300">
-                Secure secret execution is deferred; this value will not be
-                stored.
+                Use for passwords, tokens, or other sensitive values. The value
+                is encrypted for this Run, redacted from normal output and logs,
+                and is never saved on the Agent.
               </span>
             ) : null}
           </label>
@@ -194,7 +195,7 @@ export function AgentVariableEditor({
                 <option value="URL">URL</option>
                 <option value="NUMBER">Number</option>
                 <option value="BOOLEAN">Boolean</option>
-                <option value="SECRET">Secret (deferred)</option>
+                <option value="SECRET">Secret</option>
               </select>
             </label>
           </div>
@@ -232,6 +233,12 @@ export function AgentVariableEditor({
                   update(index, { defaultValue: event.target.value })
                 }
               />
+              {variable.type === 'SECRET' ? (
+                <span className="block text-xs text-slate-500">
+                  Secret defaults are never stored. Supply the value when the
+                  Agent runs.
+                </span>
+              ) : null}
             </label>
           </div>
           {(variable.type === 'TEXT' || variable.type === 'NUMBER') && (

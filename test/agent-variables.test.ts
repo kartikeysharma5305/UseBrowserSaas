@@ -222,7 +222,7 @@ describe('Phase 9 centralized resolution', () => {
     );
   });
 
-  it('explicitly blocks secret execution without persisting or echoing plaintext', () => {
+  it('resolves secret execution by reference without persisting or echoing plaintext', () => {
     const secretDefinitions: VariableDefinition[] = [
       {
         key: 'credential',
@@ -234,21 +234,64 @@ describe('Phase 9 centralized resolution', () => {
         displayOrder: 0,
       },
     ];
-    let caught: unknown;
-    try {
+    const resolved = resolveAgentInput({
+      goal: 'Use {{credential}}',
+      targetWebsite: 'https://example.com',
+      definitions: secretDefinitions,
+      supplied: { credential: 'never-store-this' },
+      definitionVersion: 1,
+    });
+    expect(resolved.task).toContain('<secret>credential</secret>');
+    expect(resolved.secretValues).toEqual({ credential: 'never-store-this' });
+    expect(resolved.snapshot.values[0]).toMatchObject({
+      value: '••••••••',
+      redacted: true,
+    });
+    expect(JSON.stringify(resolved.snapshot)).not.toContain('never-store-this');
+  });
+
+  it('never permits a secret variable in the target URL', () => {
+    expect(() =>
       resolveAgentInput({
-        goal: 'Use {{credential}}',
-        targetWebsite: 'https://example.com',
-        definitions: secretDefinitions,
-        supplied: { credential: 'never-store-this' },
+        goal: 'Sign in',
+        targetWebsite: 'https://example.com/{{credential}}',
+        definitions: [
+          {
+            key: 'credential',
+            label: 'Credential',
+            type: 'SECRET',
+            required: true,
+            defaultValue: null,
+            constraints: {},
+            displayOrder: 0,
+          },
+        ],
+        supplied: { credential: 'never-in-a-url' },
         definitionVersion: 1,
-      });
-    } catch (error) {
-      caught = error;
-    }
-    expect(caught).toBeInstanceOf(VariableResolutionError);
-    expect(caught).toMatchObject({ code: 'SECRET_VARIABLE_UNAVAILABLE' });
-    expect(String(caught)).not.toContain('never-store-this');
+      })
+    ).toThrowError(expect.objectContaining({ code: 'INVALID_VARIABLE_VALUE' }));
+  });
+
+  it('rejects engine TOTP secret names at SaaS admission', () => {
+    expect(() =>
+      resolveAgentInput({
+        goal: 'Sign in using {{login_bu_2fa_code}}',
+        targetWebsite: 'https://example.com/login',
+        definitions: [
+          {
+            key: 'login_bu_2fa_code',
+            label: 'MFA secret',
+            type: 'SECRET',
+            required: true,
+            defaultValue: null,
+            constraints: {},
+            displayOrder: 0,
+          },
+        ],
+        supplied: { login_bu_2fa_code: 'not-accepted' },
+        definitionVersion: 1,
+      })
+    ).toThrowError(expect.objectContaining({ code: 'INVALID_VARIABLE_VALUE' }));
   });
 
   it('defensively redacts a secret-shaped public snapshot', () => {

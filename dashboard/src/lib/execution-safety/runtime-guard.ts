@@ -32,6 +32,7 @@ export class ExecutionSafetyGuard {
   private readonly initialHostname: string;
   private lastNavigationUrl: string | null = null;
   private pendingFailure: SafetyPolicyError | null = null;
+  private readonly sensitiveInputCounts = new Map<string, number>();
 
   constructor(
     readonly policy: ExecutionSafetyPolicy,
@@ -108,6 +109,19 @@ export class ExecutionSafetyGuard {
     )
       throw new SafetyPolicyError('FORM_SUBMISSION_BLOCKED');
   }
+
+  assertFormInput(value: unknown, sensitiveValues: readonly string[] = []) {
+    if (this.policy.formSubmissionMode === 'BLOCKED')
+      throw new SafetyPolicyError('FORM_SUBMISSION_BLOCKED');
+    if (typeof value !== 'string') return;
+    const secret = sensitiveValues.find(
+      (candidate) => candidate.length > 0 && candidate === value
+    );
+    if (!secret) return;
+    const count = this.sensitiveInputCounts.get(secret) ?? 0;
+    if (count >= 1) throw new SafetyPolicyError('CREDENTIAL_RETRY_BLOCKED');
+    this.sensitiveInputCounts.set(secret, count + 1);
+  }
 }
 
 type SessionLike = Record<string, unknown> & {
@@ -159,7 +173,8 @@ type RouteLike = {
 
 export function installExecutionSafetyGuard(
   session: SessionLike,
-  guard: ExecutionSafetyGuard
+  guard: ExecutionSafetyGuard,
+  sensitiveValues: readonly string[] = []
 ) {
   const guardedPages = new WeakSet<object>();
   let hookedContext: BrowserContextLike | null = null;
@@ -313,6 +328,10 @@ export function installExecutionSafetyGuard(
       }
     });
   }
+  wrap('_input_text_element_node', async (original, args) => {
+    guard.assertFormInput(args[1], sensitiveValues);
+    return original(...args);
+  });
   wrap('upload_file', async () => {
     throw new SafetyPolicyError('UPLOAD_BLOCKED');
   });

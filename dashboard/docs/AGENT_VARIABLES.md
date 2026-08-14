@@ -89,18 +89,31 @@ checker, job researcher and news summary create ordinary Agents with useful
 website and task inputs. Template provenance is informational only; execution
 continues to depend solely on the ordinary Agent and Run records.
 
-## Secret limitation and redaction
+## Secret execution and redaction
 
-Secret definitions and password-form UX exist, but execution and scheduling are
-intentionally rejected with a generic safe error. Secret defaults are forbidden.
-This repository has no suitable encrypted credential store or secure
-dashboard-to-worker secret channel, and Phase 9 does not invent weak encryption
-or persist plaintext in Run/Schedule JSON.
+Manual and public-API Runs accept user-supplied `SECRET` values. A secret is
+rendered into the execution task only as an engine reference such as
+`<secret>password</secret>`; the model chooses the field while the worker
+resolves the value immediately before the validated input action. Secret
+defaults remain forbidden, and secrets cannot be interpolated into target URLs.
 
-Submitted secret values are not written to Runs, AgentEvents, notifications,
-URLs or logs and are never returned. Public snapshot serialization defensively
-masks any secret-shaped entry as `••••••••`. Encrypted reusable credentials,
-browser profiles and authenticated cookies remain deferred.
+The admission service encrypts a Run-scoped envelope with AES-256-GCM, binds it
+to the Run and Agent IDs, and stores it beside the immutable input snapshot.
+The encryption key is purpose-derived from the existing application encryption
+key. BullMQ still receives only `{ version, runId }`, so worker restart/retry
+does not require plaintext in Redis. Public snapshots expose `••••••••` only.
+The engine and dashboard redact the resolved values from action results, step
+messages, errors, final results and structured-result input. Values exist in
+worker memory only for execution and are scoped to the Agent's explicit allowed
+domain patterns.
+Public-API idempotency fingerprints use a keyed HMAC, rather than a plain hash
+of variable values, so a database snapshot does not expose a useful offline
+password-verification oracle.
+
+Schedules continue to reject secret values: reusable stored credentials,
+browser profiles and authenticated cookies remain deferred. Rotating the root
+application encryption key invalidates encrypted secrets on Runs that have not
+yet reached execution, so queued Runs should be drained before rotation.
 
 ## APIs
 
@@ -136,6 +149,6 @@ snapshot drill. Both disposable users were removed through account deletion.
 
 ## Deferred work
 
-Encrypted credentials, key rotation, secure worker delivery, reusable cookies,
+Reusable encrypted credentials, scheduled secrets, reusable cookies,
 authenticated browser profiles, expression languages, nested values, workflows
-and user-created template marketplaces are outside Phase 9.
+and user-created template marketplaces remain outside scope.

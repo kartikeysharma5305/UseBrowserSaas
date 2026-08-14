@@ -9,6 +9,7 @@ export const SAFETY_FAILURE_CODES = [
   'DOWNLOAD_BLOCKED',
   'UPLOAD_BLOCKED',
   'FORM_SUBMISSION_BLOCKED',
+  'CREDENTIAL_RETRY_BLOCKED',
   'DESTRUCTIVE_ACTION_BLOCKED',
   'PAYMENT_ACTION_BLOCKED',
   'SENSITIVE_DOMAIN_BLOCKED',
@@ -50,6 +51,8 @@ export class SafetyPolicyError extends Error {
       UPLOAD_BLOCKED: 'Upload blocked by execution safety policy.',
       FORM_SUBMISSION_BLOCKED:
         'Form submission blocked by execution safety policy.',
+      CREDENTIAL_RETRY_BLOCKED:
+        'Repeated credential entry blocked to protect the account.',
       DESTRUCTIVE_ACTION_BLOCKED:
         'Destructive action blocked by execution safety policy.',
       PAYMENT_ACTION_BLOCKED:

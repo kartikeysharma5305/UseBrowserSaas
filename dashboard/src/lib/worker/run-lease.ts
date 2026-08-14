@@ -1,5 +1,6 @@
 import {
   AgentEventType,
+  Prisma,
   RunStatus,
   UsageMeasurement,
   UsageType,
@@ -25,6 +26,7 @@ export interface ClaimedRun {
   eventStartSequence: number;
   executionTask: string | null;
   executionTargetWebsite: string | null;
+  inputSnapshot: Prisma.JsonValue | null;
   executionConfiguration: unknown;
   costBudget: unknown;
   executionSafetyPolicy: unknown;

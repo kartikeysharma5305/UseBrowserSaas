@@ -1,10 +1,10 @@
-import { createHash } from 'node:crypto';
 import { Prisma } from '@prisma/client';
 
 import { prisma } from '@/lib/db/prisma';
 import { incrementCounter } from '@/lib/operations/metrics';
 import { PrismaAgentExecutionService } from '@/lib/execution/prisma-agent-execution-service';
 import { hashIdempotencyValue } from './api-keys';
+import { protectedRunInputFingerprint } from '@/lib/variables/run-secrets';
 
 export class IdempotencyConflictError extends Error {}
 export class IdempotencyInProgressError extends Error {}
@@ -19,7 +19,7 @@ function fingerprint(
       Object.entries(variables).sort(([a], [b]) => a.localeCompare(b))
     ),
   });
-  return createHash('sha256').update(stable).digest('hex');
+  return protectedRunInputFingerprint(stable);
 }
 
 export async function createIdempotentApiRun(input: {

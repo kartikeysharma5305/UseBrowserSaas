@@ -36,6 +36,12 @@ import {
 import { ActiveRunRegistry } from './active-run-registry';
 import { normalizeSafetyPolicy } from '@/lib/execution-safety/policy';
 import { assertExecutionModelAvailable } from '@/lib/execution/model-catalogue';
+import {
+  domainScopedSecrets,
+  redactRunSecretValue,
+  revealRunSecrets,
+} from '@/lib/variables/run-secrets';
+import { safeEngineDomainPatterns } from '@/lib/execution-safety/domain-policy';
 
 export function isRetryableExecutionFailure(
   error: unknown
@@ -277,6 +283,7 @@ export class BrowserRunProcessor {
     }, this.configuration.heartbeatMs);
 
     const finalAttempt = claimed.attempt >= this.configuration.attempts;
+    let secretValues: Record<string, string> = {};
     try {
       if (!claimed.executionTask || !claimed.executionTargetWebsite) {
         await failClaimedRun(
@@ -287,6 +294,19 @@ export class BrowserRunProcessor {
         );
         return;
       }
+      const safetyPolicy = normalizeSafetyPolicy(
+        claimed.executionSafetyPolicy as Record<string, unknown> | null,
+        claimed.executionTargetWebsite
+      );
+      secretValues = revealRunSecrets(
+        claimed.inputSnapshot,
+        claimed.id,
+        claimed.agentId
+      );
+      const sensitiveData = domainScopedSecrets(
+        secretValues,
+        safeEngineDomainPatterns(safetyPolicy).allowed
+      );
       await this.execution.execute({
         runId: claimed.id,
         startedAt: claimed.startedAt,
@@ -294,10 +314,8 @@ export class BrowserRunProcessor {
         userId: claimed.agent.userId,
         task: claimed.executionTask,
         targetWebsite: claimed.executionTargetWebsite,
-        safetyPolicy: normalizeSafetyPolicy(
-          claimed.executionSafetyPolicy as Record<string, unknown> | null,
-          claimed.executionTargetWebsite
-        ),
+        safetyPolicy,
+        sensitiveData,
         configuration: agentConfiguration,
         finalAttempt,
         signal: abortController.signal,
@@ -352,7 +370,10 @@ export class BrowserRunProcessor {
         runId: claimed.id,
         agentId: claimed.agentId,
         stage: 'agent_run',
-        error: safeSerializeError(error),
+        error: redactRunSecretValue(
+          safeSerializeError(error),
+          Object.values(secretValues)
+        ),
       });
     } finally {
       clearInterval(heartbeat);

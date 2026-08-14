@@ -32,6 +32,10 @@ import { safeEngineDomainPatterns } from '@/lib/execution-safety/domain-policy';
 import { NetworkResolutionError } from '@/lib/execution-safety/network';
 import { recordProviderRunOutcome } from '@/lib/operations/signals';
 import { armBrowserShutdownRejectionContainment } from '@/lib/worker/unhandled-browser-rejection';
+import {
+  redactRunSecrets,
+  redactRunSecretValue,
+} from '@/lib/variables/run-secrets';
 
 import {
   buildScreenshotCandidates,
@@ -51,6 +55,7 @@ export interface BrowserExecutionInput {
   task: string;
   targetWebsite?: string;
   safetyPolicy?: ExecutionSafetyPolicy;
+  sensitiveData?: Record<string, string | Record<string, string>> | null;
   configuration: {
     model: string;
     provider?: 'groq' | 'nvidia';
@@ -293,10 +298,28 @@ export class BrowserExecutionService {
       agentId: input.agentId,
       runId: failure.runId,
       stage: failure.stage,
-      error: safeSerializeError(
-        failure.cause === undefined ? failure : failure.cause
+      error: this.safeError(
+        failure.cause === undefined ? failure : failure.cause,
+        input
       ),
     });
+  }
+
+  private secretStrings(input: BrowserExecutionInput) {
+    return Object.values(input.sensitiveData ?? {}).flatMap((value) =>
+      typeof value === 'string' ? [value] : Object.values(value)
+    );
+  }
+
+  private redact(value: string, input: BrowserExecutionInput) {
+    return redactRunSecrets(value, this.secretStrings(input));
+  }
+
+  private safeError(error: unknown, input: BrowserExecutionInput) {
+    return redactRunSecretValue(
+      safeSerializeError(error),
+      this.secretStrings(input)
+    );
   }
 
   async execute(input: BrowserExecutionInput): Promise<AgentExecutionResult> {
@@ -358,7 +381,8 @@ export class BrowserExecutionService {
           await deletePersistedArtifacts(eventArtifacts);
           throw error;
         }
-      }
+      },
+      (value) => this.redact(value, input)
     );
     let stage: ExecutionStage = 'engine_load';
     let browserSession: BrowserSessionLike | null = null;
@@ -406,6 +430,9 @@ export class BrowserExecutionService {
         : null;
       const browserProfile = new BrowserProfileClass({
         headless: input.configuration.browserSettings.headless,
+        ...(this.secretStrings(input).length > 0
+          ? { captcha_solver: false }
+          : {}),
         viewport: {
           width: input.configuration.browserSettings.viewportWidth,
           height: input.configuration.browserSettings.viewportHeight,
@@ -426,12 +453,14 @@ export class BrowserExecutionService {
       if (safetyGuard)
         installExecutionSafetyGuard(
           browserSession as unknown as Record<string, unknown>,
-          safetyGuard
+          safetyGuard,
+          this.secretStrings(input)
         );
       agent = new AgentClass({
         task: input.task,
         llm,
         browser_session: browserSession,
+        sensitive_data: input.sensitiveData ?? null,
         source: 'dashboard',
         use_vision: input.configuration.browserSettings.useVision ?? true,
         register_signal_handlers: false,
@@ -465,7 +494,7 @@ export class BrowserExecutionService {
               agentId: input.agentId,
               runId,
               stage: 'timeout',
-              error: safeSerializeError(error),
+              error: this.safeError(error, input),
             });
           }
           void closeBrowserOnce().catch(() => undefined);
@@ -516,7 +545,7 @@ export class BrowserExecutionService {
           agentId: input.agentId,
           runId,
           stage: 'cleanup',
-          error: safeSerializeError(cleanupError),
+          error: this.safeError(cleanupError, input),
         });
       }
     }
@@ -564,12 +593,20 @@ export class BrowserExecutionService {
       logger.warn('Run artifact collection failed', {
         runId,
         agentId: input.agentId,
-        error: safeSerializeError(error),
+        error: this.safeError(error, input),
       });
     }
 
     const finalResult = history?.final_result?.();
-    const summary = truncateEventText(finalResult, 4000) ?? null;
+    const redactedFinalResult =
+      typeof finalResult === 'string'
+        ? this.redact(finalResult, input)
+        : finalResult == null
+          ? null
+          : JSON.stringify(
+              redactRunSecretValue(finalResult, this.secretStrings(input))
+            );
+    const summary = truncateEventText(redactedFinalResult, 4000) ?? null;
     const tokenUsage = providerTokenUsage(history?.usage);
     if (
       !primaryFailure &&
@@ -682,11 +719,9 @@ export class BrowserExecutionService {
             durationMs,
             summary,
             rawResult:
-              typeof finalResult === 'string'
-                ? finalResult
-                : finalResult == null
-                  ? null
-                  : JSON.stringify(finalResult),
+              typeof redactedFinalResult === 'string'
+                ? redactedFinalResult
+                : null,
             visitedUrls,
             tokenUsage,
           },

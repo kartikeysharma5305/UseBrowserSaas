@@ -37,6 +37,41 @@ describe('worker execution safety guard', () => {
     expect(() => blockedForms.assertClick({ attributes: { type: 'submit' }, inner_text: 'Submit' })).toThrowError('Form submission blocked by execution safety policy.');
   });
 
+  it('allows a sensitive credential to be entered only once per Run', () => {
+    const guard = new ExecutionSafetyGuard(
+      normalizeSafetyPolicy(
+        { formSubmissionMode: 'SAFE_ONLY' },
+        'https://example.com'
+      ),
+      'https://example.com',
+      publicResolver
+    );
+    guard.assertFormInput('LOGIN_TEST_SECRET_9f31_guard', [
+      'LOGIN_TEST_SECRET_9f31_guard',
+    ]);
+    expect(() =>
+      guard.assertFormInput('LOGIN_TEST_SECRET_9f31_guard', [
+        'LOGIN_TEST_SECRET_9f31_guard',
+      ])
+    ).toThrowError(
+      'Repeated credential entry blocked to protect the account.'
+    );
+  });
+
+  it('blocks text entry as well as submission when forms are disabled', () => {
+    const guard = new ExecutionSafetyGuard(
+      normalizeSafetyPolicy(
+        { formSubmissionMode: 'BLOCKED' },
+        'https://example.com'
+      ),
+      'https://example.com',
+      publicResolver
+    );
+    expect(() => guard.assertFormInput('ordinary text')).toThrowError(
+      'Form submission blocked by execution safety policy.'
+    );
+  });
+
   it('wraps worker session navigation, clicks, pages and uploads', async () => {
     const page = { url: () => 'https://example.com' };
     const session: Record<string, any> = {
