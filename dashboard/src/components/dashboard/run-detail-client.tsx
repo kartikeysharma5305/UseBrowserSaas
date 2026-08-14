@@ -14,6 +14,7 @@ import {
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { ErrorState } from '@/components/dashboard/error-state';
+import { ResultMarkdown } from '@/components/dashboard/result-markdown';
 import { StatusBadge } from '@/components/dashboard/status-badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -492,19 +493,23 @@ export function RunDetailClient({ runId }: { runId: string }) {
         </div>
       )}
 
-      <section>
-        <h2 className="text-lg font-semibold">Final result</h2>
-        <div className="mt-3 border-l-2 border-slate-200 pl-4 dark:border-slate-700">
+      <section
+        aria-labelledby="final-result-heading"
+        className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900"
+      >
+        <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">
+          Result
+        </p>
+        <h2 id="final-result-heading" className="mt-1 text-xl font-semibold">
+          Final result
+        </h2>
+        <div className="mt-5 min-w-0">
           {browserResult ? (
-            <p className="whitespace-pre-wrap text-sm">
-              {summary ?? 'No summary captured.'}
-            </p>
+            <ResultMarkdown content={summary} />
           ) : typeof run.result === 'string' ? (
-            <p className="whitespace-pre-wrap text-sm">
-              {run.result || 'No result captured.'}
-            </p>
+            <ResultMarkdown content={run.result} />
           ) : (
-            <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words text-sm">
+            <pre className="max-h-80 max-w-full overflow-auto whitespace-pre-wrap break-words rounded-lg bg-slate-50 p-4 text-sm dark:bg-slate-950">
               {formatRunResultDetails(run.result)}
             </pre>
           )}
