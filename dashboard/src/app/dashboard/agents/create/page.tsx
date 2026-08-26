@@ -17,6 +17,7 @@ import {
   OutputSchemaEditor,
   type OutputSchemaView,
 } from '@/components/dashboard/output-schema-editor';
+import { parseDomainListInput } from '@/lib/execution-safety/domain-input';
 
 export default function CreateAgentPage() {
   const router = useRouter();
@@ -80,14 +81,8 @@ export default function CreateAgentPage() {
       },
       variables: variables.map(({ id: _id, ...variable }) => variable),
       safetyPolicy: {
-        allowedDomains: String(formData.get('allowedDomains') ?? '')
-          .split(',')
-          .map((value) => value.trim())
-          .filter(Boolean),
-        blockedDomains: String(formData.get('blockedDomains') ?? '')
-          .split(',')
-          .map((value) => value.trim())
-          .filter(Boolean),
+        allowedDomains: parseDomainListInput(formData.get('allowedDomains')),
+        blockedDomains: parseDomainListInput(formData.get('blockedDomains')),
         allowSubdomains: formData.get('allowSubdomains') === 'on',
         redirectPolicy: String(formData.get('redirectPolicy') ?? 'SAME_DOMAIN'),
         allowDownloads: false,

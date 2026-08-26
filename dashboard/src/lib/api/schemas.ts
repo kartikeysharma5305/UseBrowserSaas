@@ -78,15 +78,21 @@ const domainSchema = z
 
 export const executionSafetyPolicySchema = z
   .object({
-    schemaVersion: z.literal(1).optional(),
+    schemaVersion: z
+      .literal(1, { error: 'Safety policy version must be 1.' })
+      .optional(),
     allowedDomains: z.array(domainSchema).max(32).default([]),
     blockedDomains: z.array(domainSchema).max(32).default([]),
     allowSubdomains: z.boolean().default(false),
     redirectPolicy: z
       .enum(['SAME_DOMAIN', 'ALLOWED_DOMAINS'])
       .default('SAME_DOMAIN'),
-    allowDownloads: z.literal(false).default(false),
-    allowUploads: z.literal(false).default(false),
+    allowDownloads: z
+      .literal(false, { error: 'Downloads must remain blocked.' })
+      .default(false),
+    allowUploads: z
+      .literal(false, { error: 'Uploads must remain blocked.' })
+      .default(false),
     formSubmissionMode: z
       .enum(['BLOCKED', 'SAFE_ONLY', 'ALLOWED'])
       .default('SAFE_ONLY'),

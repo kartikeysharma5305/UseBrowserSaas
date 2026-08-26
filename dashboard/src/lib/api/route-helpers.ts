@@ -27,10 +27,30 @@ export function jsonError(
  */
 export function handleValidationError(error: unknown) {
   if (error instanceof ZodError) {
-    return jsonError(
-      error.issues.map((issue) => issue.message).join(', '),
-      400
-    );
+    const messages = error.issues.slice(0, 3).map((issue) => {
+      const lastField = [...issue.path]
+        .reverse()
+        .find((part): part is string => typeof part === 'string');
+      const label = lastField
+        ? lastField
+            .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+            .replace(/^./, (character) => character.toUpperCase())
+        : 'Request';
+      const entry = issue.path.find(
+        (part): part is number => typeof part === 'number'
+      );
+
+      if (
+        (lastField === 'allowedDomains' || lastField === 'blockedDomains') &&
+        entry !== undefined &&
+        issue.code === 'too_small'
+      )
+        return `${label} contains an empty entry.`;
+
+      return `${label}${entry === undefined ? '' : ` entry ${entry + 1}`}: ${issue.message}`;
+    });
+
+    return jsonError(messages.join(' '), 400);
   }
 
   return jsonError('Validation failed.', 400);
